@@ -1,0 +1,7 @@
+Metadata-Version: 2.4
+Name: tradebot
+Version: 0.1.0
+Summary: A Claude-driven trading system (paper-first).
+Requires-Python: >=3.10
+Provides-Extra: llm
+Requires-Dist: anthropic>=0.40; extra == "llm"

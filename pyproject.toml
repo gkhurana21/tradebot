@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradebot"
+version = "0.1.0"
+description = "A Claude-driven trading system (paper-first)."
+requires-python = ">=3.10"
+# Core runs on the standard library alone. `anthropic` is only needed to enable
+# the real Claude brain; install it with:  pip install -e ".[llm]"
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]
+
+[project.scripts]
+tradebot = "tradebot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

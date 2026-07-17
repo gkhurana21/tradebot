@@ -171,6 +171,63 @@ def cmd_dashboard(a):
     print(res.summary())
 
 
+def cmd_compare(a):
+    """Run the free heuristic and the real Claude brain on identical data."""
+    if a.source == "synthetic":
+        candles = list(feed.synthetic_candles(a.symbol, n=a.bars, seed=7))
+    else:
+        candles = feed.coinbase_candles(a.symbol, granularity=3600,
+                                        limit=min(a.bars, 300))
+    print(f"Comparing brains on {len(candles)} {a.symbol} candles ({a.source})\n")
+
+    def run(brain):
+        bt = Backtester(_ensemble(), brain, RiskEngine(_risk(a)),
+                        PaperBroker(a.cash))
+        return bt.run(list(candles))
+
+    # 1) Free heuristic baseline.
+    heur = Brain(use_llm=False)
+    r_heur = run(heur)
+
+    # 2) Real Claude brain (cost-guarded).
+    llm_available = _llm_available()
+    if not llm_available:
+        print("Claude brain unavailable (need ANTHROPIC_API_KEY + `pip install "
+              "anthropic`). Showing heuristic only.\n")
+    model = _MODELS.get(a.model, "claude-opus-4-8")
+    llm = Brain(use_llm=llm_available, model=model, max_calls=a.max_llm_calls)
+    r_llm = run(llm) if llm_available else None
+
+    def row(label, hv, lv):
+        return f"  {label:<16}{hv:>14}{lv:>14}"
+    print(row("metric", "heuristic", "Claude"))
+    print("  " + "-" * 44)
+    pairs = [
+        ("Return %", f"{r_heur.total_return_pct:+.2f}",
+         f"{r_llm.total_return_pct:+.2f}" if r_llm else "—"),
+        ("Sharpe", f"{r_heur.metrics.sharpe:.2f}",
+         f"{r_llm.metrics.sharpe:.2f}" if r_llm else "—"),
+        ("Max DD %", f"{r_heur.max_drawdown_pct:.2f}",
+         f"{r_llm.max_drawdown_pct:.2f}" if r_llm else "—"),
+        ("Win %", f"{r_heur.metrics.win_rate_pct:.0f}",
+         f"{r_llm.metrics.win_rate_pct:.0f}" if r_llm else "—"),
+        ("Profit factor", f"{r_heur.metrics.profit_factor:.2f}",
+         f"{r_llm.metrics.profit_factor:.2f}" if r_llm else "—"),
+        ("Trades", f"{r_heur.metrics.n_trades}",
+         f"{r_llm.metrics.n_trades}" if r_llm else "—"),
+    ]
+    for label, hv, lv in pairs:
+        print(row(label, hv, lv))
+    if r_llm:
+        print(f"\n{llm.cost_report()}")
+        edge = r_llm.total_return_pct - r_heur.total_return_pct
+        verdict = ("Claude beat the heuristic" if edge > 0
+                   else "the free heuristic held up" if edge < 0
+                   else "a tie")
+        print(f"\nOn this run, {verdict} ({edge:+.2f}% return difference). "
+              f"One run isn't proof — try a few symbols and windows.")
+
+
 def cmd_analyze(a):
     from .core.patterns import analyze
     if a.source == "synthetic":
@@ -259,6 +316,13 @@ def main(argv=None):
     d.add_argument("--symbols", default="BTC-USD,ETH-USD,SOL-USD"); d.add_argument("--bars", type=int, default=1500)
     d.add_argument("--cash", type=float, default=25_000.0); d.add_argument("--out", default="dashboard.html")
     d.add_argument("--title", default="tradebot — portfolio backtest"); d.set_defaults(func=cmd_dashboard)
+
+    cmp = sub.add_parser("compare", help="heuristic vs Claude brain on the same data")
+    common(cmp)
+    cmp.add_argument("--source", choices=["synthetic", "coinbase"], default="coinbase")
+    cmp.add_argument("--symbol", default="BTC-USD")
+    cmp.add_argument("--bars", type=int, default=300)
+    cmp.set_defaults(func=cmd_compare, model="haiku", max_llm_calls=50)
 
     an = sub.add_parser("analyze")
     an.add_argument("--source", choices=["synthetic", "coinbase"], default="coinbase")

@@ -21,18 +21,33 @@ data feed → strategy (signals) → Claude brain (decision) → risk engine (ga
 Every component is swappable behind an interface, and a backtest runs the
 **exact same code path** a live run would.
 
-## Run it now (zero dependencies, offline)
+## Quickstart
+
+A virtual environment is already set up in `.venv` with everything installed
+(including `anthropic` for the Claude brain). Activate it and use the `tradebot`
+command — no `PYTHONPATH` needed:
 
 ```bash
-python3 scripts/run_backtest.py                 # synthetic data, heuristic brain
-python3 scripts/run_backtest.py --verbose       # see every decision
-python3 tests/test_core.py                       # 8 tests on the money logic
+source .venv/bin/activate
+
+tradebot analyze --symbol BTC-USD          # read the live BTC chart
+tradebot compare --symbol BTC-USD          # free heuristic vs Claude, side by side
+tradebot montecarlo                        # the $1 -> $1M reality check
+tradebot backtest --no-llm --verbose       # watch a backtest decision-by-decision
+tradebot --help                            # all commands
 ```
 
-Use real crypto data (needs internet, no API key):
+Rebuild the environment from scratch if needed:
 
 ```bash
-python3 scripts/run_backtest.py --source coinbase --symbol ETH-USD
+python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[llm]"
+```
+
+Zero-dependency mode also works without any install:
+
+```bash
+PYTHONPATH=src python3 -m tradebot backtest --no-llm
+python3 tests/test_core.py                  # 19 tests on the money logic
 ```
 
 Enable the **real Claude brain**:
