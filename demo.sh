@@ -6,6 +6,28 @@
 set -e
 cd "$(dirname "$0")"
 
+# --- API key handling (safe) ------------------------------------------------
+# Priority: existing env var -> gitignored .env file -> hidden prompt.
+# The key is never printed, never stored in shell history, and .env is
+# gitignored + chmod 600, so it never lands in git.
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
+if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "The Claude brain (step 9) needs an Anthropic API key."
+  echo "Get one at https://console.anthropic.com  ->  API Keys."
+  printf 'Paste your key now (input hidden), or press Enter to skip and run free: '
+  read -rs KEY; echo
+  if [ -n "$KEY" ]; then
+    export ANTHROPIC_API_KEY="$KEY"
+    printf 'Save it to .env so you never re-enter it? (gitignored) [y/N] '
+    read -r SAVE
+    case "$SAVE" in
+      y|Y) (umask 077; printf 'ANTHROPIC_API_KEY=%s\n' "$KEY" > .env)
+           echo "Saved to .env (chmod 600, gitignored)." ;;
+    esac
+  fi
+  unset KEY
+fi
+
 # Activate the project venv (created during setup).
 if [ -d .venv ]; then
   # shellcheck disable=SC1091
