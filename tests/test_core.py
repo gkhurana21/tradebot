@@ -148,6 +148,17 @@ def test_montecarlo_edge_is_everything():
     assert careful.median_final > aggressive.median_final
 
 
+def test_brain_cost_estimate():
+    b = Brain(use_llm=False, model="claude-haiku-4-5")
+    b.in_tokens = 1_000_000   # 1M input @ $1
+    b.out_tokens = 1_000_000  # 1M output @ $5
+    assert abs(b.est_cost() - 6.0) < 1e-9
+    b2 = Brain(use_llm=False, model="claude-opus-4-8")
+    b2.in_tokens = 1_000_000
+    b2.out_tokens = 1_000_000
+    assert abs(b2.est_cost() - 30.0) < 1e-9   # $5 + $25
+
+
 def test_pattern_analysis_detects_uptrend():
     from datetime import datetime, timedelta, timezone
     from tradebot.core.patterns import analyze

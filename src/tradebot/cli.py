@@ -41,6 +41,21 @@ def _risk(a) -> RiskConfig:
     return cfg
 
 
+_MODELS = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5",
+           "haiku": "claude-haiku-4-5"}
+
+
+def _brain(a) -> Brain:
+    model = _MODELS.get(getattr(a, "model", None) or "opus", "claude-opus-4-8")
+    return Brain(use_llm=not a.no_llm, model=model,
+                 max_calls=getattr(a, "max_llm_calls", None))
+
+
+def _cost_note(a, brain: Brain) -> None:
+    if brain.use_llm and _llm_available() and brain.calls_made:
+        print(brain.cost_report())
+
+
 def _load_streams(source, symbols, bars):
     streams = {}
     for i, sym in enumerate(symbols):
@@ -58,11 +73,12 @@ def cmd_backtest(a):
                if a.source == "synthetic"
                else feed.coinbase_candles(a.symbol, granularity=3600, limit=min(a.bars, 300)))
     print(f"Loaded {len(candles)} {a.symbol} candles ({a.source})")
-    bt = Backtester(_ensemble(), Brain(use_llm=not a.no_llm),
+    brain = _brain(a)
+    bt = Backtester(_ensemble(), brain,
                     RiskEngine(_risk(a)), PaperBroker(a.cash), verbose=a.verbose)
     res = bt.run(candles)
     _print_mode(a)
-    print(res.summary()); print(res.metrics.table())
+    print(res.summary()); print(res.metrics.table()); _cost_note(a, brain)
 
 
 def cmd_portfolio(a):
@@ -76,12 +92,13 @@ def cmd_portfolio(a):
         snap = fetch_snapshot(); feats = snap.features()
         print(f"On-chain: {feats} ok={snap.ok}")
         ctx = (lambda sym: {"onchain": feats}) if snap.ok else None
-    bt = PortfolioBacktester(_ensemble, Brain(use_llm=not a.no_llm),
+    brain = _brain(a)
+    bt = PortfolioBacktester(_ensemble, brain,
                              RiskEngine(_risk(a)),
                              PaperBroker(a.cash), context_provider=ctx, verbose=a.verbose)
     res = bt.run(streams)
     _print_mode(a)
-    print(res.summary()); print(res.metrics.table())
+    print(res.summary()); print(res.metrics.table()); _cost_note(a, brain)
 
 
 def cmd_optimize(a):
@@ -206,6 +223,10 @@ def main(argv=None):
         sp.add_argument("--cash", type=float, default=10_000.0)
         sp.add_argument("--profile", choices=["conservative", "balanced", "aggressive"],
                         default=None, help="risk profile (aggressive = higher risk of ruin)")
+        sp.add_argument("--model", choices=["opus", "sonnet", "haiku"], default="opus",
+                        help="Claude model for the brain (haiku is ~5x cheaper for testing)")
+        sp.add_argument("--max-llm-calls", type=int, default=None, dest="max_llm_calls",
+                        help="cost guard: cap API calls per run, then fall back to heuristic")
 
     b = sub.add_parser("backtest"); common(b)
     b.add_argument("--source", choices=["synthetic", "coinbase"], default="synthetic")

@@ -43,6 +43,21 @@ export ANTHROPIC_API_KEY=sk-ant-...
 python3 scripts/run_backtest.py                 # brain mode -> "LLM (Claude)"
 ```
 
+### Cost controls (the brain costs real API money)
+
+Each signal = one Claude API call. To test cheaply and never get a surprise bill:
+
+```bash
+# haiku is ~5x cheaper than opus — good for a first paid test
+python3 -m tradebot backtest --model haiku --max-llm-calls 50 --bars 300
+```
+
+- `--model opus|sonnet|haiku` — opus is the default and most capable; haiku is ~$0.0015/call vs opus ~$0.007/call.
+- `--max-llm-calls N` — hard cap: after N API calls the run finishes on the free heuristic. Bounds spend per run.
+- Every LLM run prints an actual-spend line: `LLM calls: 34  tokens in/out: … est. spend: $0.24`.
+
+Rough budgeting: **$5 of credit ≈ ~18 opus backtests or ~90 haiku backtests.**
+
 ## Layout
 
 | Path | Role |

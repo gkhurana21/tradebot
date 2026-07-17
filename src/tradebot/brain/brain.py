@@ -13,11 +13,22 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..core.types import Account, Decision, Side, Signal
 
 MODEL = "claude-opus-4-8"
+
+# (input, output) USD per million tokens. Used only to estimate spend so the
+# cost guard can warn before a run burns through a small API balance.
+PRICES = {
+    "claude-opus-4-8": (5.0, 25.0),
+    "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
+}
+
+# Web-search server-tool version by model family (newer models need the newer tool).
+_WEB_SEARCH_NEW = {"claude-opus-4-8", "claude-sonnet-5"}
 
 SYSTEM_PROMPT = """You are the analysis engine of an automated trading system.
 You receive a deterministic strategy signal plus market context and must decide
@@ -42,6 +53,13 @@ class Brain:
     model: str = MODEL
     news_aware: bool = False       # let Claude web-search headlines before deciding
     max_web_searches: int = 2
+    max_calls: int | None = None   # cost guard: after N API calls, fall back to heuristic
+
+    # runtime cost tracking (not constructor args)
+    calls_made: int = field(default=0, init=False)
+    in_tokens: int = field(default=0, init=False)
+    out_tokens: int = field(default=0, init=False)
+    _capped_warned: bool = field(default=False, init=False)
 
     def decide(
         self,
@@ -50,12 +68,27 @@ class Brain:
         price: float,
         extra_context: dict | None = None,
     ) -> Decision:
-        if self.use_llm and _llm_available():
+        capped = self.max_calls is not None and self.calls_made >= self.max_calls
+        if self.use_llm and _llm_available() and not capped:
             try:
                 return self._decide_llm(signal, account, price, extra_context or {})
             except Exception as e:  # fall back rather than crash the loop
                 print(f"[brain] LLM error, using heuristic: {e}")
+        if capped and not self._capped_warned:
+            self._capped_warned = True
+            print(f"[brain] cost guard hit max_calls={self.max_calls}; "
+                  f"remaining decisions use the free heuristic")
         return self._decide_heuristic(signal, account, price)
+
+    def est_cost(self) -> float:
+        """Estimated USD spent so far from tracked token usage."""
+        pin, pout = PRICES.get(self.model, PRICES[MODEL])
+        return self.in_tokens / 1e6 * pin + self.out_tokens / 1e6 * pout
+
+    def cost_report(self) -> str:
+        return (f"LLM calls: {self.calls_made}  "
+                f"tokens in/out: {self.in_tokens:,}/{self.out_tokens:,}  "
+                f"est. spend: ${self.est_cost():.4f} ({self.model})")
 
     # --- LLM path ----------------------------------------------------------
     def _decide_llm(
@@ -85,8 +118,10 @@ class Brain:
         )
         if self.news_aware:
             # Server-side web search: Claude pulls fresh headlines itself.
+            tool_type = ("web_search_20260209" if self.model in _WEB_SEARCH_NEW
+                         else "web_search_20250305")
             kwargs["tools"] = [{
-                "type": "web_search_20250305",
+                "type": tool_type,
                 "name": "web_search",
                 "max_uses": self.max_web_searches,
             }]
@@ -95,6 +130,12 @@ class Brain:
                 f"{signal.symbol} and overall crypto market sentiment."
             )
         msg = client.messages.create(**kwargs)
+        # Track usage for the cost guard.
+        self.calls_made += 1
+        usage = getattr(msg, "usage", None)
+        if usage is not None:
+            self.in_tokens += getattr(usage, "input_tokens", 0) or 0
+            self.out_tokens += getattr(usage, "output_tokens", 0) or 0
         text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
         data = _extract_json(text)
         return Decision(
