@@ -148,6 +148,24 @@ def test_montecarlo_edge_is_everything():
     assert careful.median_final > aggressive.median_final
 
 
+def test_breakeven_costs_make_small_targets_impossible():
+    from tradebot.sim.breakeven import CostModel, breakeven_win_rate, net_expectancy
+    costs = CostModel()  # 30 bps round trip
+    # A 0.1% target costs 3x the move to capture -> unwinnable at any win rate.
+    assert breakeven_win_rate(0.001, 1.0, costs) > 1.0
+    # A 10% target is easily viable with a modest edge.
+    assert breakeven_win_rate(0.10, 1.0, costs) < 0.55
+    # Required win rate must fall monotonically as the target grows.
+    needs = [breakeven_win_rate(t, 1.0, costs) for t in (0.005, 0.01, 0.02, 0.05)]
+    assert needs == sorted(needs, reverse=True)
+    # Frictionless trading breaks even at exactly 50% on a 1:1 payoff.
+    free = CostModel(fee_pct=0.0, slippage_pct=0.0)
+    assert abs(breakeven_win_rate(0.02, 1.0, free) - 0.5) < 1e-9
+    # Expectancy at the break-even win rate is zero by construction.
+    p = breakeven_win_rate(0.05, 1.0, costs)
+    assert abs(net_expectancy(p, 0.05, 1.0, costs)) < 1e-9
+
+
 def test_brain_cost_estimate():
     b = Brain(use_llm=False, model="claude-haiku-4-5")
     b.in_tokens = 1_000_000   # 1M input @ $1

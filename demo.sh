@@ -16,6 +16,8 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   echo "Get one at https://console.anthropic.com  ->  API Keys."
   printf 'Paste your key now (input hidden), or press Enter to skip and run free: '
   read -rs KEY; echo
+  # Strip any stray paste artifacts (ESC/control chars, spaces) — keep only the key.
+  KEY=$(printf '%s' "$KEY" | LC_ALL=C tr -cd 'A-Za-z0-9_-')
   if [ -n "$KEY" ]; then
     export ANTHROPIC_API_KEY="$KEY"
     printf 'Save it to .env so you never re-enter it? (gitignored) [y/N] '

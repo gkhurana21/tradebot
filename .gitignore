@@ -10,3 +10,7 @@ data/*.csv
 runs/
 dashboard.html
 *.html
+
+# Go
+engine/bin/
+*.test

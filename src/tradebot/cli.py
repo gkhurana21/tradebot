@@ -255,6 +255,12 @@ def cmd_montecarlo(a):
               f"is what makes ruin near-certain.")
 
 
+def cmd_breakeven(a):
+    from .sim.breakeven import CostModel, report
+    costs = CostModel(fee_pct=a.fee, slippage_pct=a.slippage)
+    print(report(win_rate=a.win_rate, reward_risk=a.reward_risk, costs=costs))
+
+
 def cmd_onchain(a):
     from .data.onchain import fetch_snapshot
     snap = fetch_snapshot()
@@ -342,6 +348,14 @@ def main(argv=None):
     mc.add_argument("--traders", type=int, default=10000)
     mc.add_argument("--seed", type=int, default=0)
     mc.set_defaults(func=cmd_montecarlo)
+
+    be = sub.add_parser("breakeven",
+                        help="win rate required to overcome fees at each trade size")
+    be.add_argument("--win-rate", type=float, default=0.55, dest="win_rate")
+    be.add_argument("--reward-risk", type=float, default=1.0, dest="reward_risk")
+    be.add_argument("--fee", type=float, default=0.001)
+    be.add_argument("--slippage", type=float, default=0.0005)
+    be.set_defaults(func=cmd_breakeven)
 
     oc = sub.add_parser("onchain"); oc.set_defaults(func=cmd_onchain)
 
