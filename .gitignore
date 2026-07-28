@@ -17,3 +17,6 @@ engine/bin/
 
 # Swift
 dashboard/.build/
+
+# separate project, tracked on its own
+mm-harness/
