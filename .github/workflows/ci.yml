@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# A push that lands while an older run is still going supersedes it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go engine
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          # Nothing to cache: the engine has zero dependencies, and pointing
+          # the cache at a non-existent go.sum fails the setup step.
+          cache: false
+
+      - name: Verify formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+
+      # Benchmarks run one iteration each -- not for timing, but so a change
+      # that makes the hot path panic or allocate wildly fails the build.
+      - name: Smoke-run benchmarks
+        run: go test -run '^$' -bench . -benchtime 1x ./...
+
+  swift:
+    name: Swift dashboard
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Test
+        run: ./.build/TradebotKitTests
+
+  python:
+    name: Python research layer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The research layer runs on the standard library alone; installing the
+      # package proves the console entry point resolves.
+      - name: Install
+        run: pip install -e .
+
+      - name: Test
+        run: python tests/test_core.py
+
+      - name: Exercise the CLI end to end
+        env:
+          PYTHONPATH: src
+        run: |
+          python -m tradebot analyze --source synthetic --bars 300
+          python -m tradebot backtest --no-llm --bars 500
+          python -m tradebot breakeven
+          python -m tradebot montecarlo --traders 500
+
+  integration:
+    name: Go engine + Swift client
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          # Nothing to cache: the engine has zero dependencies, and pointing
+          # the cache at a non-existent go.sum fails the setup step.
+          cache: false
+
+      - name: Build the dashboard
+        run: ./build.sh
+        working-directory: dashboard
+
+      # Build first, then launch the binary with nohup: `go run` keeps a parent
+      # process that can be torn down when the step's shell exits, orphaning
+      # the server before the next step runs.
+      - name: Start the execution engine
+        run: |
+          go build -o /tmp/engine-bin ./cmd/engine
+          nohup /tmp/engine-bin -addr :8080 -cash 25000 > /tmp/engine.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf localhost:8080/health > /dev/null; then
+              echo "engine is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "engine failed to start"; cat /tmp/engine.log; exit 1
+        working-directory: engine
+
+      - name: Drive a trade through the risk gate
+        run: |
+          set -e
+          curl -sf -X POST localhost:8080/tick \
+            -d '{"symbol":"BTC-USD","price":64000}' > /dev/null
+
+          approved=$(curl -sf -X POST localhost:8080/decision \
+            -d '{"symbol":"BTC-USD","side":"BUY","confidence":0.9,"size_hint":1}')
+          echo "approved: $approved"
+          echo "$approved" | grep -q '"approved":true' \
+            || { echo "expected approval"; exit 1; }
+
+          rejected=$(curl -sf -X POST localhost:8080/decision \
+            -d '{"symbol":"BTC-USD","side":"BUY","confidence":0.1,"size_hint":1}')
+          echo "rejected: $rejected"
+          echo "$rejected" | grep -q 'rejected_low_confidence' \
+            || { echo "gate failed to reject a weak signal"; exit 1; }
+
+      # Proves the Swift client decodes what the Go service actually emits --
+      # the seam most likely to drift, and the one unit tests cannot cover.
+      - name: Probe the engine with the Swift client
+        run: |
+          out=$(./.build/TradebotDashboard.app/Contents/MacOS/TradebotDashboard --probe)
+          echo "$out"
+          echo "$out" | grep -q "LONG  BTC-USD" \
+            || { echo "Swift client did not decode the open position"; exit 1; }
+        working-directory: dashboard
+
+      - name: Engine log
+        if: always()
+        run: cat /tmp/engine.log

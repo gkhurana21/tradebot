@@ -1,5 +1,11 @@
 # tradebot — a Claude-driven trading system
 
+[![CI](https://github.com/gkhurana21/tradebot/actions/workflows/ci.yml/badge.svg)](https://github.com/gkhurana21/tradebot/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white)](engine)
+[![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](dashboard)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](src/tradebot)
+[![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
+
 A three-language trading system: **Python** researches and decides, **Go**
 executes and enforces risk, **SwiftUI** monitors. Claude is the analysis brain;
 a deterministic risk engine has final say over every order.
@@ -68,7 +74,7 @@ Zero-dependency mode also works without any install:
 
 ```bash
 PYTHONPATH=src python3 -m tradebot backtest --no-llm
-python3 tests/test_core.py                  # 19 tests on the money logic
+python3 tests/test_core.py                  # 20 tests on the money logic
 ```
 
 Enable the **real Claude brain**:
@@ -113,7 +119,12 @@ Rough budgeting: **$5 of credit ≈ ~18 opus backtests or ~90 haiku backtests.**
 | `backtest/dashboard.py` | Self-contained HTML dashboard (equity curve, tiles, trades) |
 | `live/engine.py` | Live trading loop — same code path as backtest, JSON events |
 | `live/webhook.py` | TradingView webhook receiver (stdlib, shared-secret auth) |
+| `sim/montecarlo.py` | Risk-of-ruin simulator (compounding vs. bust odds) |
+| `sim/breakeven.py` | Win rate required to overcome fees at each trade size |
 | `cli.py` | Unified `python -m tradebot` entry point |
+
+The Go engine and Swift dashboard have their own READMEs:
+[engine/README.md](engine/README.md) · [dashboard/README.md](dashboard/README.md)
 
 ## Unified CLI
 
@@ -127,6 +138,8 @@ python3 -m tradebot optimize --bars 2000 --folds 4 # walk-forward parameter sear
 python3 -m tradebot live --iterations 400 --poll 0 # live paper loop (streams JSON events)
 python3 -m tradebot webhook --secret YOURSECRET    # TradingView alert receiver -> live trader
 python3 -m tradebot dashboard --out dashboard.html # HTML report
+python3 -m tradebot breakeven                      # win rate needed to beat fees
+python3 -m tradebot montecarlo                     # risk-of-ruin simulator
 python3 -m tradebot onchain                        # live on-chain snapshot
 ```
 
@@ -193,23 +206,60 @@ brain = Brain(news_aware=True)   # needs ANTHROPIC_API_KEY + `pip install anthro
 - The risk engine converts proposals to bounded orders and can reject/veto.
 - Hard limits: max position %, risk-per-trade, stop-loss, max open positions,
   min confidence, and a daily-drawdown **kill switch** that halts trading.
+- The gate runs in a **separate process** (Go). A research-side bug cannot
+  reach the market without passing it.
+
+## Testing
+
+| Suite | Command | Coverage |
+|---|---|---|
+| Go | `cd engine && go test -race ./...` | risk gate, book P&L, engine pipeline, concurrency |
+| Swift | `cd dashboard && ./test.sh` | decoding, error mapping, polling, derived metrics |
+| Python | `PYTHONPATH=src python3 tests/test_core.py` | strategies, risk, brokers, patterns, simulators |
+
+CI runs all three on every push, plus an **integration job** that starts the Go
+engine, drives a trade through the risk gate, and probes it with the Swift
+client — the cross-language seam unit tests cannot cover.
+
+Two behaviors worth calling out, both tested:
+
+- **A bar straddling stop and target resolves as the stop.** Intrabar ordering
+  is unknowable from OHLC, so the engine assumes the adverse fill. Choosing the
+  favorable one would inflate every backtest containing a volatile bar.
+- **Recovering equity does not clear a halt.** Only an explicit new session
+  does. A kill switch that silently resets is not a kill switch.
+
+## What this does not do
+
+No live exchange connectivity. The broker layer is a simulator: it models fees
+and adverse slippage but fills instantly at the mark, with no order book, queue
+position, partial fills, or rejects. Wiring a real venue means implementing an
+adapter behind the existing interface.
+
+It also makes no claim to be profitable. The tooling here is built to *look*
+for an edge honestly — walk-forward validation that rejects overfit parameters,
+a cost model that shows what fees do to trade frequency, and a Monte Carlo that
+prices the risk of ruin. Whether an edge exists on public data for a retail
+trader is an open question this repo does not pretend to have answered.
 
 ## Roadmap
 
 - [x] Adapter architecture + paper broker + risk engine
 - [x] EMA/RSI strategy + Claude brain (with offline fallback)
-- [x] Event-driven backtester + tests (11 passing)
-- [x] Pro metrics: Sharpe, Sortino, Calmar, profit factor, trade ledger
-- [x] Second strategy (Bollinger) + agreement ensemble
+- [x] Event-driven backtester, pro metrics, trade ledger
+- [x] Bollinger + pattern strategies, agreement ensemble
 - [x] Multi-symbol portfolio backtester
 - [x] On-chain signals (gas, stablecoin supply) via public RPC
 - [x] News-aware brain (Claude web-search) + on-chain context
-- [x] HTML dashboard (equity curve, stat tiles, trade log)
 - [x] TradingView webhook receiver (Pine alerts → signals)
-- [x] Live paper loop (real-time feed, JSON event stream)
-- [x] Walk-forward optimization (out-of-sample validated)
-- [x] Unified CLI (`python -m tradebot`)
+- [x] Live paper loop, walk-forward optimization, unified CLI
+- [x] **Go execution engine** — 104 ns/op risk gate, race-tested
+- [x] **SwiftUI dashboard** — native live monitor
+- [x] **CI** across all three languages + cross-language integration
 - [ ] MetaTrader 5 adapter (Windows VPS) for forex
 - [ ] SQLite persistence + regime detection
 - [ ] Prove Claude brain edge vs heuristic on real data
-```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

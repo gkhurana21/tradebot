@@ -9,7 +9,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILD=.build
-TARGET=arm64-apple-macosx14.0
+# Detect the host arch so this works on both Apple Silicon and Intel runners.
+TARGET="$(uname -m)-apple-macosx14.0"
 mkdir -p "$BUILD"
 
 echo "==> Building TradebotKit (library)"
