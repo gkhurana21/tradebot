@@ -2,6 +2,12 @@ import Charts
 import SwiftUI
 import TradebotKit
 
+/// Explicitly main-actor isolated rather than relying on it.
+///
+/// Swift 6 makes `View` implicitly `@MainActor`, but 5.10 does not -- and this
+/// view reads `@MainActor` state on `DashboardModel`. Stating the isolation
+/// keeps the code compiling on both.
+@MainActor
 struct DashboardView: View {
     let model: DashboardModel
 
