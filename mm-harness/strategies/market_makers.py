@@ -23,6 +23,7 @@ trade; fills use agent name "mm" for us and "flow" for counterparties.
 """
 
 import math
+from collections import deque
 
 MM_AGENT = "mm"
 
@@ -273,6 +274,118 @@ class QueueAwareMM(InventorySkewMM):
         return max(best, cap)                  # shallow queue: join it
 
 
+class AdaptiveMM(Strategy):
+    """Self tuning MM for an environment whose parameters are NOT known in
+    advance: unknown vol, unknown latency, unknown competitors, unknown
+    flow toxicity. Built for dropping into someone else's simulator.
+
+    Rather than estimating latency and toxicity separately, it closes a
+    loop on realized markout. Every fill is scored markout_lag steps later
+    against where fair actually went:
+
+        markout = signed_size * (fair_later - fill_price)
+
+    That number already contains everything that hurts a market maker:
+    adverse selection, latency staleness, and competitors picking us off.
+    If the average markout per unit is below target_edge we are quoting too
+    tight for this environment and the spread widens; if it is comfortably
+    above, the spread tightens to win more volume. Widening is faster than
+    tightening, which is the safe asymmetry.
+
+    Inventory skew and the one sided toxicity guard are carried over from
+    the ladder because they held in every regime and every latency tested.
+
+    aggression scales quoted size. Raise it when the scoring function is
+    raw PnL and you need variance; lower it when blowups are punished.
+    """
+
+    name = "Adaptive"
+
+    def __init__(self, size=4, max_inventory=12, aggression=1.0,
+                 markout_lag=10, target_edge=0.01, widen=0.20, tighten=0.06,
+                 start_half=0.05, min_half=0.01, max_half=0.60,
+                 vol_floor_mult=2.0, skew=0.02, window=80,
+                 tox_decay=0.85, tox_widen=0.03, tox_shrink=0.25):
+        self.size = size
+        self.max_inventory = max_inventory
+        self.aggression = aggression
+        self.markout_lag = markout_lag    # steps before a fill is scored
+        self.target_edge = target_edge    # wanted markout per unit
+        self.widen = widen                # up step when markout disappoints
+        self.tighten = tighten            # down step when markout is good
+        self.half = start_half            # the controlled variable
+        self.min_half = min_half
+        self.max_half = max_half
+        self.vol_floor_mult = vol_floor_mult   # safety floor while learning
+        self.skew = skew
+        self.tox_decay = tox_decay
+        self.tox_widen = tox_widen
+        self.tox_shrink = tox_shrink
+        self.step = 0
+        self.pending = []                 # (due_step, signed_size, price)
+        self.marks = deque(maxlen=window)  # recent per unit markouts
+        self.tox_bid = 0.0
+        self.tox_ask = 0.0
+
+    # ---- the control loop -------------------------------------------------
+
+    def _score_due_fills(self, fair):
+        """Score every fill whose markout window has elapsed."""
+        still_pending = []
+        for due, signed, price in self.pending:
+            if due <= self.step:
+                self.marks.append(signed * (fair - price) / abs(signed))
+            else:
+                still_pending.append((due, signed, price))
+        self.pending = still_pending
+
+    def _update_half(self, vol_est):
+        if len(self.marks) >= 20:
+            avg = sum(self.marks) / len(self.marks)
+            if avg < self.target_edge:
+                self.half *= 1.0 + self.widen
+            elif avg > 2.0 * self.target_edge:
+                self.half *= 1.0 - self.tighten
+        floor = max(self.min_half, self.vol_floor_mult * vol_est)
+        self.half = min(max(self.half, floor), self.max_half)
+
+    def on_fills(self, fills, state):
+        for f in fills:
+            signed = f.size if f.buy_agent == MM_AGENT else -f.size
+            self.pending.append((self.step + self.markout_lag, signed, f.price))
+            if f.buy_agent == MM_AGENT:
+                self.tox_bid += f.size
+            else:
+                self.tox_ask += f.size
+
+    # ---- quoting ----------------------------------------------------------
+
+    def quote(self, state):
+        self.step += 1
+        fair, tick, inv = state["fair_est"], state["tick"], state["inventory"]
+        self._score_due_fills(fair)
+        self._update_half(state["vol_est"])
+        self.tox_bid *= self.tox_decay
+        self.tox_ask *= self.tox_decay
+
+        center = fair - inv * self.skew
+        net = self.tox_bid - self.tox_ask
+        bid_pressure = max(0.0, net)
+        ask_pressure = max(0.0, -net)
+
+        bid = round_down(center - self.half - self.tox_widen * bid_pressure, tick)
+        ask = round_up(center + self.half + self.tox_widen * ask_pressure, tick)
+
+        base = max(1, round(self.size * self.aggression))
+        bid_sz = 0 if inv >= self.max_inventory else base
+        ask_sz = 0 if inv <= -self.max_inventory else base
+        if bid_sz > 0:
+            bid_sz = max(1, round(bid_sz / (1.0 + self.tox_shrink * bid_pressure)))
+        if ask_sz > 0:
+            ask_sz = max(1, round(ask_sz / (1.0 + self.tox_shrink * ask_pressure)))
+        return bid, bid_sz, ask, ask_sz
+
+
 # Instantiate fresh for every run, some strategies carry state between steps.
 LADDER = [SymmetricMM, InventorySkewMM, VolScaledMM,
-          AvellanedaStoikovMM, AdverseSelectionMM, QueueAwareMM]
+          AvellanedaStoikovMM, AdverseSelectionMM, QueueAwareMM, AdaptiveMM]

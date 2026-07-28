@@ -1,25 +1,46 @@
 # tradebot — a Claude-driven trading system
 
-An automated trading system where **Claude is the analysis brain** and a
-**deterministic risk engine** has final say over every order. Built
-paper-first on macOS, with an adapter architecture so execution venues
-(paper → crypto REST → MetaTrader 5) are interchangeable.
+A three-language trading system: **Python** researches and decides, **Go**
+executes and enforces risk, **SwiftUI** monitors. Claude is the analysis brain;
+a deterministic risk engine has final say over every order.
 
 > ⚠️ **Not financial advice. Trading risks real money.** This is a software
 > project. Run it in paper mode. Nothing here executes live trades until you
 > wire a live adapter and flip it on yourself — with your own eyes on the risk.
 
-## The loop
+## Architecture
 
 ```
-data feed → strategy (signals) → Claude brain (decision) → risk engine (gate + size) → broker → logs
-                                        │                          │
-                                  proposes only            hard limits, kill switch,
-                                                            final veto
+  Python — research                Go — execution              Swift — monitoring
+  ─────────────────                ──────────────              ──────────────────
+  market data ─┐                   ┌──────────────────┐        ┌────────────────┐
+  indicators   ├─→ Claude brain ──→│ risk gate  104ns │──fills→│ equity curve   │
+  patterns     │    (proposes)  HTTP│ position book    │  HTTP  │ positions      │
+  backtests   ─┘                   │ bracket monitor  │───────→│ halt state     │
+                                   └──────────────────┘        └────────────────┘
+                                    decides; can say no
 ```
+
+**Why the split.** Research is IO-bound and exploratory — it calls an LLM,
+replays history, tolerates seconds of latency. Execution is the opposite:
+fast, deterministic, and impossible to bypass by accident. Putting the risk
+gate behind a process boundary means a research-side bug *cannot* reach the
+market without passing it.
+
+| Component | Language | What it does |
+|---|---|---|
+| [research + backtesting](src/tradebot) | Python | strategies, Claude brain, backtester, walk-forward optimizer, Monte Carlo |
+| [execution engine](engine) | Go | risk gate, position book, HTTP service — 104 ns/op, 0 allocs, race-tested |
+| [dashboard](dashboard) | SwiftUI | live native monitor — equity curve, positions, halt state |
 
 Every component is swappable behind an interface, and a backtest runs the
 **exact same code path** a live run would.
+
+```bash
+cd engine    && go test -race ./... && go run ./cmd/engine   # execution service
+cd dashboard && ./test.sh && ./run.sh                        # native monitor
+PYTHONPATH=src python3 tests/test_core.py                    # research layer
+```
 
 ## Quickstart
 
