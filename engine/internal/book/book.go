@@ -207,6 +207,53 @@ func (b *Book) Close(symbol, reason string) (types.Fill, bool) {
 	return fill, true
 }
 
+// RecordFill applies a fill that already happened at a real venue.
+//
+// Distinct from Execute, which *simulates* a fill at the current mark. When a
+// venue is attached the venue decides the price and quantity -- possibly a
+// partial fill, possibly zero -- and the book's job is to record that truth,
+// not to re-derive it. Recording a fill the venue did not give us is how a
+// local book silently diverges from the real account.
+//
+// A zero-quantity fill (order accepted but not yet filled) is ignored.
+func (b *Book) RecordFill(fill types.Fill, stop, target float64) {
+	if fill.Qty <= 0 || fill.Price <= 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	signed := fill.Qty
+	if fill.Side == types.Sell {
+		signed = -fill.Qty
+	}
+	b.applyLocked(fill.Symbol, signed, fill.Price, fill.Fee, stop, target)
+	b.marks[fill.Symbol] = fill.Price
+	b.fills = append(b.fills, fill)
+}
+
+// Reconcile replaces local positions and cash with the venue's view.
+//
+// The venue is authoritative: it knows about fills from other sessions, manual
+// intervention, liquidations, and anything that happened while this process
+// was down. Called at startup so the engine never begins trading against a
+// stale picture of the account.
+func (b *Book) Reconcile(positions map[string]types.Position, cash float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.cash = cash
+	b.positions = make(map[string]types.Position, len(positions))
+	for symbol, pos := range positions {
+		b.positions[symbol] = pos
+		// Seed a mark from the entry price so equity is computable before the
+		// first tick arrives; a live price overwrites it moments later.
+		if _, ok := b.marks[symbol]; !ok && pos.AvgPrice > 0 {
+			b.marks[symbol] = pos.AvgPrice
+		}
+	}
+}
+
 // applyLocked mutates cash and the position for a signed quantity change.
 // The caller must hold b.mu.
 func (b *Book) applyLocked(symbol string, signedQty, price, fee, stop, target float64) {

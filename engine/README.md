@@ -117,10 +117,60 @@ Two behaviors worth noting, both tested:
 - **Recovering equity does not clear a halt.** Only an explicit `StartDay`
   does. A kill switch that silently resets is not a kill switch.
 
-## Not included
+## Placing real orders
 
-No live exchange connectivity. The `book` package is a simulator: it models
-fees and adverse slippage but fills instantly at the mark, with no order book,
-queue position, partial fills, or rejects. Wiring a real venue means
-implementing an adapter behind the same interface — the risk gate and book are
-already isolated from it.
+A `Venue` sits *behind* the risk gate: the engine evaluates, the gate sizes and
+approves, and only then does an order reach a broker. Nothing else calls a
+venue, so no code path can bypass risk.
+
+```bash
+go run ./cmd/engine -venue sim            # default: simulated fills, no account
+go run ./cmd/engine -venue alpaca-paper   # real order lifecycle, no money
+go run ./cmd/engine -venue alpaca-live -i-understand-this-trades-real-money
+```
+
+Credentials come from the environment, never flags — a flag lands in shell
+history and in `ps` output:
+
+```bash
+export APCA_API_KEY_ID=...
+export APCA_API_SECRET_KEY=...
+```
+
+### Safety properties
+
+| Property | Why |
+|---|---|
+| Live needs **two** independent flags | one mistyped flag must never be the difference between paper and real money |
+| Credentials are env-only | keeps keys out of shell history and process listings |
+| Startup **reconciles** with the venue | the broker knows about fills from other sessions; trading against a stale local book would misprice every order |
+| Reconcile failure **aborts** | refusing to start beats trading blind |
+| Live mode logs a `WARN` banner | an operator should never have to infer that money is at stake |
+| Orders carry an **idempotency key** | a timeout on a POST is ambiguous; the key means a retry cannot become a second position |
+| 4xx is **never** retried | the request is wrong; repeating it cannot help |
+| A failed close does **not** update the book | risk must not believe a position is flat while the broker still holds it |
+
+### Venue constraints are enforced, not discovered
+
+Alpaca spot crypto has three limits that would otherwise surface as rejected
+orders on your account's record:
+
+- **Symbols are `BTC/USD`**, not the engine's `BTC-USD` — translated on the wire
+- **Time-in-force must be `gtc` or `ioc`** — `day` is rejected
+- **No brackets and no shorting** — so `Preflight` blocks a sell with no
+  inventory before it is sent, and the engine keeps monitoring stops itself.
+  With no venue-side bracket, the engine is the *only* thing watching your
+  stop; if the process dies, the position is unprotected.
+
+`Capabilities()` advertises these, and the engine reads them rather than
+assuming. A venue that supports shorting or brackets simply reports so.
+
+### What is still simulated
+
+`-venue sim` fills instantly at the mark with no order book, queue position,
+partial fills, or rejects. That is what `alpaca-paper` exists to replace: same
+code path, real order lifecycle, no money.
+
+The wire format was written against Alpaca's published API and is covered by
+tests using a stubbed transport, but it has **not** been smoke-tested against a
+live paper account — do that before trusting it with anything.

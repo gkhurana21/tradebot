@@ -11,6 +11,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,7 +19,12 @@ import (
 	"github.com/gkhurana21/tradebot/engine/internal/book"
 	"github.com/gkhurana21/tradebot/engine/internal/risk"
 	"github.com/gkhurana21/tradebot/engine/internal/types"
+	"github.com/gkhurana21/tradebot/engine/internal/venue"
 )
+
+// venueTimeout bounds any single call to a trading venue. A hung broker must
+// not wedge the engine's owner goroutine, which serializes all state.
+const venueTimeout = 10 * time.Second
 
 // ErrClosed is returned when work is submitted to a stopped engine.
 var ErrClosed = errors.New("engine: closed")
@@ -72,6 +78,11 @@ type Engine struct {
 	book *book.Book
 	risk *risk.Engine
 
+	// venue is nil for simulated execution. When set, approved orders are
+	// sent to it and the book records the fills it actually reports.
+	venue   venue.Venue
+	baseCtx context.Context
+
 	ticks     chan Tick
 	decisions chan decisionReq
 	events    chan Event
@@ -83,6 +94,7 @@ type Engine struct {
 	closed    atomic.Bool
 
 	nTicks, nDecisions, nFills, nRejected, nExits atomic.Uint64
+	nOrders                                       atomic.Uint64
 }
 
 type decisionReq struct {
@@ -90,17 +102,38 @@ type decisionReq struct {
 	result   chan risk.Result // optional; nil for fire-and-forget
 }
 
+// Option configures an Engine.
+type Option func(*Engine)
+
+// WithVenue routes approved orders to a real trading venue instead of the
+// simulated book.
+//
+// There is deliberately no way to set this after construction: whether a
+// process can move real money is decided once, at startup, by the operator --
+// never toggled at runtime by a request.
+func WithVenue(v venue.Venue) Option {
+	return func(e *Engine) { e.venue = v }
+}
+
 // New returns an engine bound to b and r. Call Start before submitting work.
-func New(b *book.Book, r *risk.Engine) *Engine {
-	return &Engine{
+func New(b *book.Book, r *risk.Engine, opts ...Option) *Engine {
+	e := &Engine{
 		book:      b,
 		risk:      r,
+		baseCtx:   context.Background(),
 		ticks:     make(chan Tick, 1024),
 		decisions: make(chan decisionReq, 256),
 		events:    make(chan Event, 1024),
 		done:      make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
+
+// Venue returns the attached venue, or nil when execution is simulated.
+func (e *Engine) Venue() venue.Venue { return e.venue }
 
 // Events returns the read-only event stream.
 func (e *Engine) Events() <-chan Event { return e.events }
@@ -109,6 +142,7 @@ func (e *Engine) Events() <-chan Event { return e.events }
 // the first call has an effect.
 func (e *Engine) Start(ctx context.Context) {
 	e.startOnce.Do(func() {
+		e.baseCtx = ctx
 		e.risk.StartDay(e.book.Equity())
 		e.wg.Add(1)
 		go e.run(ctx)
@@ -239,8 +273,24 @@ func (e *Engine) checkBrackets(t Tick) {
 	}
 }
 
-// exitAt flattens at an exact bracket level, then restores the live mark.
+// exitAt flattens a position whose bracket was touched.
+//
+// With a venue attached the exit is a real market order -- Alpaca does not
+// hold brackets on crypto, so the engine is the only thing watching the stop.
+// Simulated mode fills at the exact bracket level instead.
 func (e *Engine) exitAt(t Tick, level float64, reason string) {
+	if e.venue != nil {
+		before := e.nExits.Load()
+		e.closePosition(t.Symbol, reason)
+		if e.nExits.Load() > before {
+			e.emit(Event{
+				Kind: EventExit, TS: t.TS, Symbol: t.Symbol,
+				Equity: e.book.Equity(), Reason: reason,
+			})
+		}
+		return
+	}
+
 	e.book.Mark(t.Symbol, level)
 	fill, ok := e.book.Close(t.Symbol, reason)
 	e.book.Mark(t.Symbol, t.Price)
@@ -282,17 +332,39 @@ func (e *Engine) handleDecision(d types.Decision) risk.Result {
 	// Flip: flatten an opposing position before entering the other way, so we
 	// never hold both directions at once.
 	if pos := positions[d.Symbol]; !pos.IsFlat() && d.Side.Opposes(pos.Qty) {
-		if _, closed := e.book.Close(d.Symbol, "flip"); closed {
-			e.nExits.Add(1)
+		e.closePosition(d.Symbol, "flip")
+	}
+
+	var fill types.Fill
+	if e.venue != nil {
+		var err error
+		fill, err = e.placeAtVenue(res.Order, positions[d.Symbol])
+		if err != nil {
+			res.Verdict, res.Reason = risk.RejectInvalid, err.Error()
+			e.nRejected.Add(1)
+			e.emit(Event{
+				Kind: EventRejected, TS: d.TS, Symbol: d.Symbol, Side: d.Side,
+				Verdict: res.Verdict, Reason: res.Reason, Equity: e.book.Equity(),
+			})
+			return res
+		}
+		// A venue can accept an order without filling it yet. Report that
+		// honestly rather than counting a fill that has not happened.
+		if fill.Qty <= 0 {
+			res.Reason = "accepted by venue, not yet filled"
+			return res
+		}
+		e.book.RecordFill(fill, res.Order.StopLoss, res.Order.TakeProfit)
+	} else {
+		var ok bool
+		fill, ok = e.book.Execute(res.Order, res.Order.Tag)
+		if !ok {
+			res.Verdict, res.Reason = risk.RejectInvalid, "execution rejected by book"
+			e.nRejected.Add(1)
+			return res
 		}
 	}
 
-	fill, ok := e.book.Execute(res.Order, res.Order.Tag)
-	if !ok {
-		res.Verdict, res.Reason = risk.RejectInvalid, "execution rejected by book"
-		e.nRejected.Add(1)
-		return res
-	}
 	e.nFills.Add(1)
 	e.emit(Event{
 		Kind: EventFill, TS: fill.TS, Symbol: fill.Symbol, Side: fill.Side,
@@ -300,6 +372,56 @@ func (e *Engine) handleDecision(d types.Decision) risk.Result {
 		Verdict: res.Verdict, Reason: res.Order.Tag,
 	})
 	return res
+}
+
+// placeAtVenue sends an approved order to the live venue.
+//
+// Preflight runs first so orders the venue structurally cannot accept -- a
+// short on spot crypto, say -- are caught here rather than becoming a rejected
+// order on the account's record.
+func (e *Engine) placeAtVenue(order types.Order, held types.Position) (types.Fill, error) {
+	if err := venue.Preflight(order, held, e.venue.Capabilities()); err != nil {
+		return types.Fill{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(e.baseCtx, venueTimeout)
+	defer cancel()
+
+	// A stable key per logical order: a retry inside the venue client reuses
+	// it, so a timeout cannot produce two positions.
+	key := fmt.Sprintf("%s-%d-%d", order.Symbol, order.TS.UnixNano(), e.nOrders.Add(1))
+	return e.venue.Place(ctx, order, key)
+}
+
+// closePosition flattens a symbol at the venue when one is attached, and in
+// the local book otherwise.
+func (e *Engine) closePosition(symbol, reason string) {
+	if e.venue == nil {
+		if _, closed := e.book.Close(symbol, reason); closed {
+			e.nExits.Add(1)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(e.baseCtx, venueTimeout)
+	defer cancel()
+
+	fill, err := e.venue.Close(ctx, symbol, reason)
+	if err != nil {
+		// A failed close is the dangerous case: risk believes the position is
+		// gone while the venue still holds it. Surface it loudly; do not
+		// update the book to a state that is not real.
+		e.emit(Event{
+			Kind: EventRejected, Symbol: symbol,
+			Reason: "CLOSE FAILED at venue, position may still be open: " + err.Error(),
+			Equity: e.book.Equity(),
+		})
+		return
+	}
+	if fill.Qty > 0 {
+		e.book.RecordFill(fill, 0, 0)
+		e.nExits.Add(1)
+	}
 }
 
 // emit publishes an event, dropping it if no consumer is keeping up.
