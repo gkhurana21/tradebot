@@ -88,6 +88,12 @@ jobs:
       - name: Test
         run: python tests/test_core.py
 
+      # The graph tests fake every model call, so they need no key and no spend.
+      - name: Test the research graph
+        run: |
+          pip install -e ".[graph]"
+          python tests/test_graph.py
+
       - name: Exercise the CLI end to end
         env:
           PYTHONPATH: src

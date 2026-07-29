@@ -121,6 +121,7 @@ Rough budgeting: **$5 of credit ≈ ~18 opus backtests or ~90 haiku backtests.**
 | `live/webhook.py` | TradingView webhook receiver (stdlib, shared-secret auth) |
 | `sim/montecarlo.py` | Risk-of-ruin simulator (compounding vs. bust odds) |
 | `sim/breakeven.py` | Win rate required to overcome fees at each trade size |
+| `brain/graph.py` | LangGraph research pipeline (thesis / critique / judge) |
 | `cli.py` | Unified `python -m tradebot` entry point |
 
 The Go engine and Swift dashboard have their own READMEs:
@@ -142,6 +143,49 @@ python3 -m tradebot breakeven                      # win rate needed to beat fee
 python3 -m tradebot montecarlo                     # risk-of-ruin simulator
 python3 -m tradebot onchain                        # live on-chain snapshot
 ```
+
+### Two research brains
+
+```bash
+tradebot backtest --brain single    # one Claude call (default)
+tradebot backtest --brain graph     # LangGraph: thesis -> critique -> judge
+```
+
+The default brain makes one call: everything in, a decision out. A single pass
+has no way to catch its own motivated reasoning -- a model handed a bullish
+signal tends to find bullish reasons.
+
+`--brain graph` splits research into stages and makes one of them adversarial:
+
+```mermaid
+graph LR
+  gather --> thesis --> critique
+  critique -.fatal.-> veto
+  critique -.-> judge
+```
+
+| Node | Role | Cost |
+|---|---|---|
+| `gather` | deterministic feature extraction, incl. cost drag | free |
+| `thesis` | argues **for** the trade | 1 call |
+| `critique` | argues **against** it, and only against it | 1 call |
+| `judge` | weighs both and commits | 1 call |
+| `veto` | terminal, when the critique is fatal | free |
+
+The conditional edge is what makes this a graph rather than a chain: a damning
+critique routes straight to a veto and skips the judge entirely. Rejections are
+the common case, so it usually costs **2 calls, not 3**.
+
+Both brains return the same `Decision`, so the backtester, live loop, risk
+engine, and Go service are unchanged either way.
+
+Two design choices worth noting: a **failed critique fails closed** (losing the
+adversary is treated as maximum doubt, never as "no objection"), and the final
+rationale **carries both sides** of the argument — a losing trade is only
+reviewable later if you recorded what the system argued against.
+
+Optional install: `pip install -e ".[graph]"`. It costs 2–3x a single call and
+there is no evidence yet that it trades better — that is what `compare` is for.
 
 ### Chart pattern & trend analysis
 

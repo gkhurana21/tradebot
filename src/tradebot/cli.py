@@ -45,14 +45,30 @@ _MODELS = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5",
            "haiku": "claude-haiku-4-5"}
 
 
-def _brain(a) -> Brain:
+def _brain(a):
+    """Builds the research brain named by --brain.
+
+    Both kinds satisfy the same decide() contract, so everything downstream --
+    backtester, live loop, risk engine -- is identical either way.
+    """
     model = _MODELS.get(getattr(a, "model", None) or "opus", "claude-opus-4-8")
-    return Brain(use_llm=not a.no_llm, model=model,
-                 max_calls=getattr(a, "max_llm_calls", None))
+    max_calls = getattr(a, "max_llm_calls", None)
+
+    if getattr(a, "brain", "single") == "graph" and not a.no_llm:
+        from .brain.graph import GraphBrain, graph_available
+        if not graph_available():
+            print("[brain] graph unavailable (needs ANTHROPIC_API_KEY and "
+                  '`pip install -e ".[graph]"`); using the single-call brain')
+        else:
+            return GraphBrain(model=model, max_calls=max_calls)
+
+    return Brain(use_llm=not a.no_llm, model=model, max_calls=max_calls)
 
 
-def _cost_note(a, brain: Brain) -> None:
-    if brain.use_llm and _llm_available() and brain.calls_made:
+def _cost_note(a, brain) -> None:
+    """Prints actual spend. Works for either brain kind -- GraphBrain has no
+    use_llm flag, since a graph is only ever constructed when LLM mode is on."""
+    if getattr(brain, "calls_made", 0) and hasattr(brain, "cost_report"):
         print(brain.cost_report())
 
 
@@ -290,6 +306,9 @@ def main(argv=None):
                         help="Claude model for the brain (haiku is ~5x cheaper for testing)")
         sp.add_argument("--max-llm-calls", type=int, default=None, dest="max_llm_calls",
                         help="cost guard: cap API calls per run, then fall back to heuristic")
+        sp.add_argument("--brain", choices=["single", "graph"], default="single",
+                        help="single = one Claude call; graph = thesis/critique/judge "
+                             "pipeline (2-3x the calls)")
 
     b = sub.add_parser("backtest"); common(b)
     b.add_argument("--source", choices=["synthetic", "coinbase"], default="synthetic")
