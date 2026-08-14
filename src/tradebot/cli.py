@@ -211,8 +211,21 @@ def cmd_compare(a):
         print("Claude brain unavailable (need ANTHROPIC_API_KEY + `pip install "
               "anthropic`). Showing heuristic only.\n")
     model = _MODELS.get(a.model, "claude-opus-4-8")
-    llm = Brain(use_llm=llm_available, model=model, max_calls=a.max_llm_calls)
+
+    def progress(made, cap):
+        # A run with no output is indistinguishable from a hung one, which is
+        # exactly the confusion this avoids.
+        total = f"/{cap}" if cap else ""
+        print(f"\r  querying Claude... {made}{total} calls", end="", flush=True)
+
+    llm = Brain(use_llm=llm_available, model=model,
+                max_calls=a.max_llm_calls, progress=progress)
+    if llm_available:
+        print(f"Running the Claude brain ({model}, capped at "
+              f"{a.max_llm_calls} calls)...")
     r_llm = run(llm) if llm_available else None
+    if llm_available:
+        print()  # close the progress line
 
     def row(label, hv, lv):
         return f"  {label:<16}{hv:>14}{lv:>14}"

@@ -54,6 +54,10 @@ class Brain:
     news_aware: bool = False       # let Claude web-search headlines before deciding
     max_web_searches: int = 2
     max_calls: int | None = None   # cost guard: after N API calls, fall back to heuristic
+    timeout: float = 20.0          # per-call ceiling, seconds
+    # Called after each API call as progress(calls_made, max_calls). Long runs
+    # are otherwise indistinguishable from hung ones.
+    progress: object = None
 
     # runtime cost tracking (not constructor args)
     calls_made: int = field(default=0, init=False)
@@ -96,7 +100,11 @@ class Brain:
     ) -> Decision:
         import anthropic
 
-        client = anthropic.Anthropic()
+        # A backtest makes hundreds of these. The SDK's 10-minute default means
+        # a single stalled response blocks the whole run, so bound it tightly:
+        # a decision that takes 20s is already useless, and the heuristic
+        # fallback is better than a hang.
+        client = anthropic.Anthropic(timeout=self.timeout, max_retries=1)
         pos = account.position(signal.symbol)
         context = {
             "signal_side": signal.side.value,
@@ -136,6 +144,9 @@ class Brain:
         if usage is not None:
             self.in_tokens += getattr(usage, "input_tokens", 0) or 0
             self.out_tokens += getattr(usage, "output_tokens", 0) or 0
+        if callable(self.progress):
+            self.progress(self.calls_made, self.max_calls)
+
         text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
         data = _extract_json(text)
         return Decision(

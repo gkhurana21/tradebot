@@ -20,3 +20,6 @@ dashboard/.build/
 
 # separate project, tracked on its own
 mm-harness/
+
+# separate repo, tracked on its own
+friday/
