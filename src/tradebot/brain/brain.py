@@ -44,7 +44,7 @@ CACHE_READ_PRICES = {
 CACHE_WRITE_MULTIPLIER = 1.25
 
 # Web-search server-tool version by model family (newer models need the newer tool).
-_WEB_SEARCH_NEW = {"claude-opus-4-8", "claude-sonnet-5"}
+_WEB_SEARCH_NEW = {"claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-8", "claude-sonnet-5"}
 
 # Thinking is on by default for the 5.5 family and its tokens count toward
 # max_tokens, so a 200-token budget can be eaten before any JSON is written.

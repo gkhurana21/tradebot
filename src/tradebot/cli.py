@@ -51,7 +51,7 @@ def _brain(a):
     Both kinds satisfy the same decide() contract, so everything downstream --
     backtester, live loop, risk engine -- is identical either way.
     """
-    model = _MODELS.get(getattr(a, "model", None) or "opus", "claude-opus-4-8")
+    model = _MODELS[getattr(a, "model", None) or "opus"]
     max_calls = getattr(a, "max_llm_calls", None)
 
     if getattr(a, "brain", "single") == "graph" and not a.no_llm:
@@ -210,7 +210,7 @@ def cmd_compare(a):
     if not llm_available:
         print("Claude brain unavailable (need ANTHROPIC_API_KEY + `pip install "
               "anthropic`). Showing heuristic only.\n")
-    model = _MODELS.get(a.model, "claude-opus-4-8")
+    model = _MODELS[a.model]
 
     def progress(made, cap):
         # A run with no output is indistinguishable from a hung one, which is
