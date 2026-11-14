@@ -8,6 +8,7 @@
 
 <br/>
 
+[![Live demo](https://img.shields.io/badge/Live%20demo-backtest%20report-2A78D6?style=for-the-badge&logo=githubpages&logoColor=white)](https://gkhurana21.github.io/tradebot/)
 [![Try the demo](https://img.shields.io/badge/Try%20the%20demo-one%20command-00C853?style=for-the-badge&logo=gnubash&logoColor=white)](#-try-it-in-one-command)
 [![Portfolio](https://img.shields.io/badge/Portfolio-gaurangkhurana.ca-111111?style=for-the-badge&logo=About.me&logoColor=white)](https://gaurangkhurana.ca)
 
