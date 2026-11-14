@@ -19,7 +19,7 @@
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?style=flat-square&logo=swift&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude-brain%20%2B%20MCP-D97757?style=flat-square&logo=anthropic&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-185%20%2B%20116%20Swift%20checks-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-188%20%2B%20116%20Swift%20checks-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 [What it does](#-what-it-does) • [Coin-flip test](#-does-it-beat-a-coin-flip) • [Architecture](#%EF%B8%8F-architecture) • [Design decisions](docs/DESIGN.md) • [Try it](#-try-it-in-one-command)
@@ -60,7 +60,7 @@ mode. Every row in the feed is the engine's own verdict and reason.</sub></p>
 <tr>
 <td align="center" width="25%"><h3>105 ns</h3><sub>per risk check in the Go gate, 0 allocations; 0.3 ms per decision from Python over HTTP</sub></td>
 <td align="center" width="25%"><h3>p = 0.15</h3><sub>out-of-sample against 199 coin-flip twins: no proven edge, and it says so</sub></td>
-<td align="center" width="25%"><h3>185</h3><sub>tests in Go and Python, 116 Swift checks, and a CI job that drives Python → Go → Swift end to end</sub></td>
+<td align="center" width="25%"><h3>188</h3><sub>tests in Go and Python, 116 Swift checks, and a CI job that drives Python → Go → Swift end to end</sub></td>
 <td align="center" width="25%"><h3>2 flags</h3><sub>needed for real money, so one typo never trades it</sub></td>
 </tr>
 </table>
@@ -347,8 +347,8 @@ trading was never built there.
 
 | Suite | Command | Count |
 |---|---|---|
-| Go | `cd engine && go test -race ./...` | 85 tests + 3 benchmarks |
-| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py`, `test_claudetest.py`, `test_bridge.py`, `test_risk_parity.py` | 28 + 13 + 7 + 29 + 22 + 1 (27 shared fixtures) |
+| Go | `cd engine && go test -race ./...` | 87 tests + 3 benchmarks |
+| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py`, `test_claudetest.py`, `test_bridge.py`, `test_risk_parity.py` | 28 + 13 + 7 + 29 + 23 + 1 (27 shared fixtures) |
 | Swift | `cd dashboard && ./test.sh` | 116 checks in 24 suites |
 
 CI runs all three on every push, plus two cross-language jobs. The **bridge** job starts the Go engine, runs the
