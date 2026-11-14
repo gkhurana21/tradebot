@@ -384,7 +384,9 @@ def cmd_nulltest(a):
     if a.brain == "claude":
         return _nulltest_claude(a, streams)
     print(f"Running the strategy once and its coin-flip twin {a.seeds} times...")
-    res = run_nulltest(streams, _ensemble, seeds=a.seeds, cash=a.cash)
+    if a.zero_costs:
+        print("ZERO COSTS: fees and slippage set to 0 for every run")
+    res = run_nulltest(streams, _ensemble, seeds=a.seeds, cash=a.cash, zero_costs=a.zero_costs)
     print(res.summary())
     if a.svg:
         from .sim.nulltest import histogram_svg
@@ -448,8 +450,10 @@ def _nulltest_claude(a, streams):
         if not os.path.exists(cache_path):
             raise SystemExit(f"No decision cache at {cache_path}; build prompts, submit and collect first.")
         print(f"Replaying {cache_path} against {a.seeds} + {a.seeds} twins (no API calls)...")
+        if a.zero_costs:
+            print("ZERO COSTS: fees and slippage set to 0 for every run (separates choices from turnover)")
         print(ct.run_claude_test(streams, _ensemble, cache_path, model,
-                                 seeds=a.seeds, cash=a.cash).summary())
+                                 seeds=a.seeds, cash=a.cash, zero_costs=a.zero_costs).summary())
     except (ct.CapExceeded, ct.InvalidRun, ct.CacheMiss, ct.CacheMismatch, ValueError) as e:
         raise SystemExit(str(e))
 
@@ -570,6 +574,8 @@ def main(argv=None):
     nt.add_argument("--seeds", type=int, default=199)
     nt.add_argument("--cash", type=float, default=25_000.0)
     nt.add_argument("--svg", default=None, help="also write a histogram of the coin-flip returns")
+    nt.add_argument("--zero-costs", action="store_true", dest="zero_costs",
+                    help="set fees and slippage to 0 (separates better choices from trading less)")
     nt.add_argument("--brain", choices=["heuristic", "claude"], default="heuristic")
     nt.add_argument("--model", choices=sorted(_MODELS), default="haiku", help="claude brain only")
     nt.add_argument("--start", default=None, help="UTC date, inclusive")

@@ -591,6 +591,7 @@ class ClaudeTestResult:
     heuristic: NullTestResult       # descriptive, own null, same window
     model: str
     cache_sha256: str
+    zero_costs: bool = False
 
     def summary(self) -> str:
         d, v, h = self.direction, self.veto_flip, self.heuristic
@@ -605,7 +606,9 @@ class ClaudeTestResult:
             "1. Agreement with the strategy's signal (reported first)",
             rates_report(self.rates),
             "",
-            f"2. Co-primary tests, one-sided, alpha = {ALPHA} each, total return after costs",
+            f"2. Co-primary tests, one-sided, alpha = {ALPHA} each, total return "
+            + ("BEFORE costs (fees and slippage set to 0; exploratory)" if self.zero_costs
+               else "after costs"),
             f"   Claude        : {d.real_return_pct:+.2f}% · {d.real_trades} round trips · "
             f"{d.real_win_rate_pct:.1f}% win rate",
             f"   (a) sign-randomised twins (K={d.seeds}): median "
@@ -640,7 +643,7 @@ def slice_streams(streams: dict[str, list[Candle]], start: datetime | None,
 
 def run_claude_test(streams: dict[str, list[Candle]], strategy_factory: Callable[[], Strategy],
                     cache_path: str, model: str, seeds: int = 199, cash: float = 25_000.0,
-                    workers: int | None = None) -> ClaudeTestResult:
+                    workers: int | None = None, zero_costs: bool = False) -> ClaudeTestResult:
     require_testable(model)
     rows = [r for r in load_cache(cache_path).values()
             if r["model"] == model and r["prompt_version"] == PROMPT_VERSION]
@@ -651,12 +654,14 @@ def run_claude_test(streams: dict[str, list[Candle]], strategy_factory: Callable
                          + rates_report(rates))
     factory = ReplayFactory(cache_path, model)
     direction = run_nulltest(streams, strategy_factory, brain_factory=factory,
-                             cash=cash, seeds=seeds, workers=workers)
+                             cash=cash, seeds=seeds, workers=workers, zero_costs=zero_costs)
     veto_flip = run_twins(streams, strategy_factory, factory,
                           TwinFactory(rates["veto_rate"], rates["flip_rate"]),
-                          cash=cash, seeds=seeds, workers=workers)
-    heuristic = run_nulltest(streams, strategy_factory, cash=cash, seeds=seeds, workers=workers)
-    return ClaudeTestResult(rates, direction, veto_flip, heuristic, model, file_sha256(cache_path))
+                          cash=cash, seeds=seeds, workers=workers, zero_costs=zero_costs)
+    heuristic = run_nulltest(streams, strategy_factory, cash=cash, seeds=seeds, workers=workers,
+                             zero_costs=zero_costs)
+    return ClaudeTestResult(rates, direction, veto_flip, heuristic, model, file_sha256(cache_path),
+                            zero_costs)
 
 
 # --- pre-registration template ------------------------------------------------------------------------

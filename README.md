@@ -19,7 +19,7 @@
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?style=flat-square&logo=swift&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude-brain%20%2B%20MCP-D97757?style=flat-square&logo=anthropic&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-188%20%2B%20116%20Swift%20checks-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-189%20%2B%20116%20Swift%20checks-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 [What it does](#-what-it-does) • [Coin-flip test](#-does-it-beat-a-coin-flip) • [Architecture](#%EF%B8%8F-architecture) • [Design decisions](docs/DESIGN.md) • [Try it](#-try-it-in-one-command)
@@ -59,8 +59,8 @@ mode. Every row in the feed is the engine's own verdict and reason.</sub></p>
 <table>
 <tr>
 <td align="center" width="25%"><h3>105 ns</h3><sub>per risk check in the Go gate, 0 allocations; 0.3 ms per decision from Python over HTTP</sub></td>
-<td align="center" width="25%"><h3>p = 0.15</h3><sub>out-of-sample against 199 coin-flip twins: no proven edge, and it says so</sub></td>
-<td align="center" width="25%"><h3>188</h3><sub>tests in Go and Python, 116 Swift checks, and a CI job that drives Python → Go → Swift end to end</sub></td>
+<td align="center" width="25%"><h3>$0.27</h3><sub>for a pre-registered test of whether Claude beats a coin flip. It doesn't, and the repo shows why</sub></td>
+<td align="center" width="25%"><h3>189</h3><sub>tests in Go and Python, 116 Swift checks, and a CI job that drives Python → Go → Swift end to end</sub></td>
 <td align="center" width="25%"><h3>2 flags</h3><sub>needed for real money, so one typo never trades it</sub></td>
 </tr>
 </table>
@@ -128,14 +128,38 @@ this uses the Python risk engine; a shared parity test checks it sizes every ord
 tradebot nulltest --source snapshot --seeds 199 --svg coinflip.svg   # ~2 minutes, all cores, no API calls
 ```
 
-### Next: does *Claude* beat a coin flip? (pre-registered, not yet run)
+### Does *Claude* beat a coin flip? (pre-registered, run once)
 
-The same test with the Claude brain (Haiku 5.5) making the decisions. Everything is fixed in
-[the pre-registration](docs/claude-test-preregistration.md) **before** any paid call: two co-primary tests at
-α = 0.025 each, a failure rule, and "one run, no reruns". The prompt is account-free, so all 4,590 prompts are
-built offline and the whole batch's worst-case cost is computed exactly before sending: **$0.51**, under a hard $1
-cap. Claude's agreement rate with the strategy's own signal is reported first, so a Claude that just echoes the
-signal can't take credit for the strategy. The data window starts after Haiku 5.5's training cutoff (June 2026).
+The same test with Claude (Haiku 5.5) making every decision. Everything was fixed in
+[the pre-registration](docs/claude-test-preregistration.md) before the first paid call: the prompt (account-free, so
+all 4,590 prompts were built offline), two co-primary tests at α = 0.025 each, a failure rule and "one run, no
+reruns". The whole batch's worst case was computed before sending ($0.51); it actually cost **$0.27**. The data
+starts after Haiku 5.5's training cutoff (June 2026). Every answer is committed in
+[`docs/claude`](docs/claude) with its sha256 and a per-request spend ledger.
+
+| | Result |
+|---|---|
+| Valid run? | yes: 23 of 4,590 answers unusable (0.50%; the limit was 2%) |
+| Agreement with the strategy's signal | 59.8%; Claude vetoed the other 40.2% and never flipped a direction |
+| **(a) Direction:** Claude vs 199 sign-randomised twins | −11.39% vs median −8.03%, **p = 0.805**: no skill |
+| **(b) Filtering:** Claude vs 199 random-veto twins at the same 40.2% rate | −11.39% vs median −22.06%, **p = 0.005**: passes α = 0.025 |
+| (b) before fees and slippage *(exploratory)* | −1.51% vs median +3.28%, **p = 0.900**: no skill |
+
+**Verdict: no evidence that Claude understands these markets.** Test (b) passed as pre-registered, but the
+random-veto twins traded twice as much (473 round trips vs Claude's 238) and paid twice the fees. With costs set to
+zero the advantage disappears, so the after-cost win came from Claude *trading less*, not from choosing better
+trades. Claude's vetoes cluster in quiet, sideways stretches ("the signal looks like noise"), which cuts turnover.
+That can be useful, and it is cheap, but it isn't skill.
+
+The pre-registered p = 0.005 is reported as it came out; the zero-cost check was not pre-registered and is labelled
+exploratory. A [replication on fresh data](docs/claude-replication-preregistration.md) (2026-11-15 to 2027-01-15),
+pre-registered now with the cost-free test as its primary, will say whether Claude's skips carry any information at
+all. The full write-up is in [docs/REPORT.md](docs/REPORT.md).
+
+```bash
+tradebot nulltest --brain claude --seeds 199                 # reads the committed answers: free, no key needed
+tradebot nulltest --brain claude --seeds 199 --zero-costs    # the exploratory before-costs check
+```
 
 ## 🏗️ Architecture
 
@@ -348,7 +372,7 @@ trading was never built there.
 | Suite | Command | Count |
 |---|---|---|
 | Go | `cd engine && go test -race ./...` | 87 tests + 3 benchmarks |
-| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py`, `test_claudetest.py`, `test_bridge.py`, `test_risk_parity.py` | 28 + 13 + 7 + 29 + 23 + 1 (27 shared fixtures) |
+| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py`, `test_claudetest.py`, `test_bridge.py`, `test_risk_parity.py` | 28 + 13 + 8 + 29 + 23 + 1 (27 shared fixtures) |
 | Swift | `cd dashboard && ./test.sh` | 116 checks in 24 suites |
 
 CI runs all three on every push, plus two cross-language jobs. The **bridge** job starts the Go engine, runs the
@@ -373,7 +397,10 @@ and Python must stop with exit code 2 and no further trades.
 | `legacy-bot/` | July 2026 predecessor |
 | `docs/data/` | the committed Coinbase snapshot behind the coin-flip result |
 | `docs/DESIGN.md` | design decisions and their trade-offs |
+| `docs/REPORT.md` | research note: does an LLM add trading skill? |
 | `docs/claude-test-preregistration.md` | the frozen plan for the Claude coin-flip test |
+| `docs/claude/` | every Claude answer from that test, its sha256 and the per-request spend ledger |
+| `docs/claude-replication-preregistration.md` | the frozen plan for the fresh-data replication |
 | `tests/fixtures/risk_parity.json` | cases both risk engines must agree on |
 | `docs/tools/` | a scripted demo driver for the dashboard |
 
