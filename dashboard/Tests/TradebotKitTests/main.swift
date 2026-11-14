@@ -269,6 +269,250 @@ await suite("recovery clears the failure state") { @MainActor in
     check(model.hasEverConnected, "lastUpdate recorded")
 }
 
+// MARK: - Engine API v2: decisions, marks, session baseline
+
+/// Records every requested URL so cursor handling can be asserted.
+final class RecordingTransport: HTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [URL] = []
+    let responses: [String: (Data, Int)]
+    init(_ responses: [String: (Data, Int)]) { self.responses = responses }
+    var urls: [URL] { lock.lock(); defer { lock.unlock() }; return recorded }
+
+    private func record(_ url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        recorded.append(url)
+    }
+
+    func get(_ url: URL) async throws -> (Data, Int) {
+        record(url)
+        guard let hit = responses[url.lastPathComponent] else {
+            throw EngineError.unreachable("no stub for \(url.lastPathComponent)")
+        }
+        return hit
+    }
+    func post(_ url: URL, body: Data) async throws -> (Data, Int) { try await get(url) }
+}
+
+let statsV2JSON = """
+{"ticks":10,"decisions":8,"fills":5,"rejected":3,"exits":1,"halted":false,"equity":25100,
+ "venue":"sim","live":false,"session_start_equity":25000,
+ "limits":{"max_daily_drawdown_pct":0.05,"max_open_positions":3,"min_confidence":0.55,"max_position_pct":0.2}}
+"""
+
+let decisionsJSON = """
+{"next_seq":5,"oldest_seq":1,"gap":false,"items":[
+ {"seq":1,"at":"2026-11-14T21:16:31.586526Z","kind":"decision","symbol":"BTC-USD","side":"BUY","confidence":0.85,
+  "verdict":"approved","approved":true,"reason":"sized 0.0780 BTC-USD · risk 0.4% to stop","qty":0.078,"price":64098.5},
+ {"seq":2,"at":"2026-11-14T21:16:34Z","kind":"decision","symbol":"ETH-USD","side":"BUY","confidence":0.3,
+  "verdict":"rejected","approved":false,"reason":"confidence 0.30 < min 0.55"},
+ {"seq":3,"at":"2026-11-14T21:16:35.123456789Z","kind":"exit","symbol":"BTC-USD","side":"SELL","reason":"stop","qty":0.078,"price":62700},
+ {"seq":4,"at":"2026-11-14T21:16:36.5+00:00","kind":"halt","reason":"halted: daily drawdown 5.2% ≥ 5%"}
+]}
+"""
+
+func decisionClient(_ transport: HTTPTransport) -> EngineClient {
+    EngineClient(baseURL: URL(string: "http://127.0.0.1:8080")!, transport: transport)
+}
+
+func item(_ seq: UInt64, approved: Bool = true) -> DecisionItem {
+    DecisionItem(seq: seq, at: Date(), symbol: "BTC-USD", side: "BUY", confidence: 0.8,
+                 verdict: approved ? "approved" : "rejected", approved: approved, reason: "r\(seq)")
+}
+
+await suite("ISO-8601 parsing accepts nanoseconds, microseconds and no fraction") {
+    let whole = ISO8601.parse("2026-11-14T21:16:31Z")
+    check(whole != nil, "no-fraction form parses")
+    let micro = ISO8601.parse("2026-11-14T21:16:31.586526Z")
+    let nano = ISO8601.parse("2026-11-14T21:16:31.586526789Z")
+    let trimmed = ISO8601.parse("2026-11-14T21:16:31.5Z")
+    check(micro != nil && nano != nil && trimmed != nil, "fractional forms parse")
+    if let whole, let micro, let nano, let trimmed {
+        checkClose(micro.timeIntervalSince(whole), 0.586526, "microsecond fraction kept", tolerance: 1e-4)
+        checkClose(nano.timeIntervalSince(whole), 0.586526789, "nanosecond fraction kept", tolerance: 1e-4)
+        checkClose(trimmed.timeIntervalSince(whole), 0.5, "short fraction kept", tolerance: 1e-4)
+    }
+    checkEqual(ISO8601.parse("2026-11-14T21:16:31+00:00"), whole, "numeric offset parses")
+    check(ISO8601.parse("yesterday") == nil, "garbage rejected")
+}
+
+await suite("decodes /decisions with every kind and date form") {
+    let transport = RecordingTransport(["decisions": (Data(decisionsJSON.utf8), 200)])
+    let page = try await decisionClient(transport).decisions()
+    checkEqual(page.nextSeq, 5, "next_seq")
+    checkEqual(page.items.count, 4, "items")
+    checkEqual(page.gap, false, "gap")
+    checkEqual(page.items[0].kind, .decision, "decision kind")
+    check(page.items[0].isApproved, "approved decision")
+    check(!page.items[1].isApproved, "rejected decision is not approved")
+    checkEqual(page.items[2].kind, .exit, "exit kind")
+    checkEqual(page.items[3].kind, .halt, "halt kind")
+    checkEqual(page.items[3].symbol, nil, "halt has no symbol")
+    checkClose(page.items[0].confidence ?? 0, 0.85, "confidence")
+    check(page.items[2].at.timeIntervalSince(page.items[1].at) > 0.9, "later item has later date")
+    checkEqual(transport.urls.last?.query, nil, "no cursor means no query string")
+}
+
+await suite("humanises the gate's reasons and keeps unknown ones") {
+    checkEqual(item(1).displayReason, "R1", "unknown reason is capitalised")
+    let low = DecisionItem(seq: 1, at: Date(), reason: "confidence 0.30 < min 0.55")
+    checkEqual(low.displayReason, "Confidence 30% is below the 55% minimum", "confidence")
+    let slots = DecisionItem(seq: 1, at: Date(), reason: "max open positions 3 reached")
+    checkEqual(slots.displayReason, "3 of 3 position slots in use", "slots")
+    let cap = DecisionItem(seq: 1, at: Date(), symbol: "BTC-USD", reason: "position at max notional 20%")
+    checkEqual(cap.displayReason, "BTC already at the 20% max position size", "exposure cap")
+    let halt = DecisionItem(seq: 1, at: Date(), reason: "halted: daily drawdown 5.2% ≥ 5%")
+    checkEqual(halt.displayReason, "Kill switch active (5.2% daily loss, limit 5%)", "halt")
+}
+
+await suite("feed advances its since-cursor and de-duplicates") { @MainActor in
+    let transport = RecordingTransport([
+        "decisions": (Data(decisionsJSON.utf8), 200),
+        "stats": (Data(statsV2JSON.utf8), 200),
+        "positions": (Data(positionsJSON.utf8), 200),
+    ])
+    let model = DashboardModel(client: decisionClient(transport))
+    await model.refresh()
+    checkEqual(model.decisions.count, 4, "first poll loads the journal")
+    checkEqual(model.decisions.first?.seq, 4, "newest first")
+    checkEqual(model.decisionCursor, 5, "cursor is the page's next_seq")
+    checkEqual(model.decisionsSupported, true, "supported")
+
+    await model.refresh() // the stub replays the same page
+    checkEqual(model.decisions.count, 4, "replayed items are not duplicated")
+    let asked = transport.urls.filter { $0.lastPathComponent == "decisions" }
+    checkEqual(asked.count, 2, "polled twice")
+    checkEqual(asked[0].query, nil, "first poll has no cursor")
+    checkEqual(asked[1].query, "since=5", "second poll asks since the cursor")
+}
+
+await suite("feed keeps the newest 50 and flags gaps") { @MainActor in
+    let model = DashboardModel(client: makeClient())
+    model.applyDecisions(DecisionPage(nextSeq: 61, items: (1...60).map { item(UInt64($0)) }))
+    checkEqual(model.decisions.count, 50, "capped at 50")
+    checkEqual(model.decisions.first?.seq, 60, "newest kept")
+    checkEqual(model.decisions.last?.seq, 11, "oldest dropped")
+    check(!model.decisionsGap, "no gap yet")
+
+    model.applyDecisions(DecisionPage(nextSeq: 400, oldestSeq: 300, gap: true,
+                                      items: [item(300), item(301)]))
+    check(model.decisionsGap, "gap remembered")
+    checkEqual(model.decisions.first?.seq, 301, "items after the gap are still shown")
+    checkEqual(model.decisionCursor, 400, "cursor jumps to next_seq")
+}
+
+await suite("an engine restart resets the feed") { @MainActor in
+    let model = DashboardModel(client: makeClient())
+    model.applyDecisions(DecisionPage(nextSeq: 10, items: [item(8), item(9)]))
+    model.applyDecisions(DecisionPage(nextSeq: 1, items: []))
+    checkEqual(model.decisions.count, 0, "stale feed dropped")
+    checkEqual(model.decisionCursor, nil, "cursor cleared so the next poll reads from the start")
+}
+
+await suite("a 404 on /decisions does not disconnect an older engine") { @MainActor in
+    let transport = RecordingTransport([
+        "decisions": (Data("404 page not found".utf8), 404),
+        "stats": (Data(statsJSON.utf8), 200),
+        "positions": (Data(positionsJSON.utf8), 200),
+    ])
+    let model = DashboardModel(client: decisionClient(transport))
+    await model.refresh()
+    checkEqual(model.connection, .live, "still connected")
+    checkEqual(model.decisionsSupported, false, "feed marked unsupported")
+    checkEqual(model.consecutiveFailures, 0, "no failure counted")
+    checkEqual(model.stats.sessionStartEquity, nil, "old stats decode without v2 fields")
+    checkEqual(model.stats.limits, nil, "old stats have no limits")
+}
+
+await suite("a failing /decisions (500) does not disconnect either") { @MainActor in
+    let transport = RecordingTransport([
+        "decisions": (Data("{}".utf8), 500),
+        "stats": (Data(statsV2JSON.utf8), 200),
+        "positions": (Data(positionsJSON.utf8), 200),
+    ])
+    let model = DashboardModel(client: decisionClient(transport))
+    await model.refresh()
+    checkEqual(model.connection, .live, "still connected")
+    checkEqual(model.decisionsSupported, nil, "support unknown, will retry")
+}
+
+await suite("positions decode mark and unrealized P&L, with or without them") {
+    let v2 = try JSONDecoder().decode(PortfolioSnapshot.self, from: Data("""
+    {"equity":1,"cash":1,"positions":{"BTC-USD":{"symbol":"BTC-USD","qty":0.5,"avg_price":64000,
+     "stop_loss":62720,"take_profit":66560,"mark":64500,"unrealized_pnl":250}}}
+    """.utf8))
+    let btc = v2.positions["BTC-USD"]
+    checkClose(btc?.mark ?? 0, 64500, "mark")
+    checkClose(btc?.unrealizedPnL ?? 0, 250, "unrealized pnl")
+    checkClose(btc?.unrealizedFraction ?? 0, 250.0 / 32000.0, "pnl as share of cost")
+
+    let old = try JSONDecoder().decode(PortfolioSnapshot.self, from: Data(positionsJSON.utf8))
+    checkEqual(old.positions["BTC-USD"]?.mark, nil, "older engine: no mark")
+    checkEqual(old.positions["BTC-USD"]?.unrealizedPnL, nil, "older engine: no pnl")
+
+    // The engine reports mark 0 until a symbol's first tick.
+    let unticked = try JSONDecoder().decode(PortfolioSnapshot.self, from: Data("""
+    {"equity":1,"cash":1,"positions":{"X":{"symbol":"X","qty":1,"avg_price":10,
+     "stop_loss":9,"take_profit":12,"mark":0,"unrealized_pnl":0}}}
+    """.utf8))
+    checkEqual(unticked.positions["X"]?.mark, nil, "zero mark reads as unknown")
+    checkEqual(unticked.positions["X"]?.unrealizedPnL, nil, "and so does its pnl")
+}
+
+await suite("stop-to-target bar puts the stop on the left for longs and shorts") {
+    let long = Position(symbol: "L", qty: 1, avgPrice: 100, stopLoss: 90, takeProfit: 120)
+    checkClose(long.bracketFraction(at: 90) ?? -1, 0, "long at stop")
+    checkClose(long.bracketFraction(at: 120) ?? -1, 1, "long at target")
+    checkClose(long.bracketFraction(at: 100) ?? -1, 1.0 / 3.0, "long entry")
+    let short = Position(symbol: "S", qty: -1, avgPrice: 100, stopLoss: 110, takeProfit: 80)
+    checkClose(short.bracketFraction(at: 110) ?? -1, 0, "short at stop is still the left end")
+    checkClose(short.bracketFraction(at: 80) ?? -1, 1, "short at target is the right end")
+    checkClose(short.bracketFraction(at: 200) ?? -1, 0, "clamped beyond the stop")
+    check(Position(symbol: "N", qty: 1, avgPrice: 1).bracketFraction(at: 1) == nil, "no bracket, no bar")
+    checkClose(long.distanceToStop(from: 100) ?? 0, 0.10, "distance to stop")
+    checkClose(long.distanceToTarget(from: 100) ?? 0, 0.20, "distance to target")
+}
+
+await suite("stats decode the session baseline and limits (fractions)") {
+    let s = try JSONDecoder().decode(EngineStats.self, from: Data(statsV2JSON.utf8))
+    checkClose(s.sessionStartEquity ?? 0, 25000, "session_start_equity")
+    checkClose(s.limits?.maxDailyDrawdown ?? 0, 0.05, "drawdown limit is a fraction")
+    checkEqual(s.limits?.maxOpenPositions, 3, "position slots")
+    checkClose(s.limits?.minConfidence ?? 0, 0.55, "min confidence")
+    checkClose(s.limits?.maxPositionFraction ?? 0, 0.2, "max position")
+}
+
+await suite("session change uses the engine's baseline, not the first sample") { @MainActor in
+    let model = DashboardModel(client: makeClient())
+    let t0 = Date()
+    let limits = RiskLimits(maxDailyDrawdown: 0.05, maxOpenPositions: 3,
+                            minConfidence: 0.55, maxPositionFraction: 0.2)
+    // The dashboard was opened late: its first sample is already 24,900, but
+    // the engine's session began at 25,000.
+    model.apply(stats: EngineStats(equity: 24_900, sessionStartEquity: 25_000, limits: limits),
+                portfolio: PortfolioSnapshot(equity: 24_900, cash: 24_900, positions: [:]), at: t0)
+    checkClose(model.sessionChange, -100, "dollar change from engine baseline")
+    checkClose(model.sessionReturn, -0.004, "fractional change from engine baseline")
+    checkClose(model.dailyLoss, 0.004, "daily loss is positive")
+    checkClose(model.dailyLossUsed ?? -1, 0.08, "8% of the kill-switch limit used")
+
+    model.apply(stats: EngineStats(equity: 25_250, sessionStartEquity: 25_000, limits: limits),
+                portfolio: PortfolioSnapshot(equity: 25_250, cash: 25_250, positions: [:]),
+                at: t0.addingTimeInterval(1))
+    checkClose(model.sessionChange, 250, "gain")
+    checkClose(model.dailyLoss, 0, "no daily loss when up")
+
+    // Older engine: fall back to the first sample this dashboard saw.
+    let old = DashboardModel(client: makeClient())
+    old.apply(stats: EngineStats(equity: 10_000),
+              portfolio: PortfolioSnapshot(equity: 10_000, cash: 0, positions: [:]), at: t0)
+    old.apply(stats: EngineStats(equity: 10_100),
+              portfolio: PortfolioSnapshot(equity: 10_100, cash: 0, positions: [:]),
+              at: t0.addingTimeInterval(1))
+    checkClose(old.sessionChange, 100, "fallback change")
+    checkEqual(old.dailyLossUsed, nil, "no limits, no meter")
+}
+
 // MARK: - Summary
 
 print()

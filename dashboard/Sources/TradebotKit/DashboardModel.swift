@@ -37,15 +37,28 @@ public final class DashboardModel {
     /// operator than showing zeros.
     public private(set) var consecutiveFailures = 0
 
+    /// Newest first, capped at `decisionLimit`.
+    public private(set) var decisions: [DecisionItem] = []
+    /// False once the engine answers 404 for /decisions: an older engine, not a
+    /// broken one. Unknown (nil) until the first answer.
+    public private(set) var decisionsSupported: Bool?
+    /// True if the engine's ring overwrote entries before we read them.
+    public private(set) var decisionsGap = false
+    /// Next `since` to ask for; nil means "everything retained".
+    public private(set) var decisionCursor: UInt64?
+
     private let client: EngineClient
     private let pollInterval: Duration
     private let historyLimit: Int
+    private let decisionLimit: Int
     private var pollTask: Task<Void, Never>?
 
     public init(client: EngineClient,
                 pollInterval: Duration = .milliseconds(1000),
-                historyLimit: Int = 300) {
+                historyLimit: Int = 300,
+                decisionLimit: Int = 50) {
         self.client = client
+        self.decisionLimit = decisionLimit
         self.pollInterval = pollInterval
         self.historyLimit = historyLimit
     }
@@ -56,10 +69,34 @@ public final class DashboardModel {
     /// "starting up" from "was live, now down".
     public var hasEverConnected: Bool { lastUpdate != nil }
 
-    /// Equity change since the first observed sample, as a fraction.
+    /// Equity at the start of the session. Prefers the engine's own baseline
+    /// (the one its kill switch uses, and which survives a dashboard relaunch);
+    /// falls back to the first sample this dashboard saw for an older engine.
+    public var sessionStartEquity: Double? {
+        if let start = stats.sessionStartEquity, start > 0 { return start }
+        if let first = equityHistory.first, first.equity > 0 { return first.equity }
+        return nil
+    }
+
+    /// Dollar change since the session start.
+    public var sessionChange: Double {
+        guard let start = sessionStartEquity else { return 0 }
+        return stats.equity - start
+    }
+
+    /// Equity change since the session start, as a fraction.
     public var sessionReturn: Double {
-        guard let first = equityHistory.first, first.equity > 0 else { return 0 }
-        return (stats.equity - first.equity) / first.equity
+        guard let start = sessionStartEquity else { return 0 }
+        return (stats.equity - start) / start
+    }
+
+    /// Loss from the session start as a positive fraction, 0 when up.
+    public var dailyLoss: Double { max(0, -sessionReturn) }
+
+    /// Share of the kill-switch limit already used, 0...1, if the limit is known.
+    public var dailyLossUsed: Double? {
+        guard let limit = stats.limits?.maxDailyDrawdown, limit > 0 else { return nil }
+        return min(dailyLoss / limit, 1)
     }
 
     /// Y-axis range for the equity chart: the observed low and high plus some
@@ -109,6 +146,47 @@ public final class DashboardModel {
     /// Performs one poll cycle. Exposed so tests can drive the model
     /// deterministically instead of waiting on wall-clock time.
     public func refresh() async {
+        // The journal is fetched on its own path: its failure must never
+        // decide whether the engine counts as connected, and vice versa.
+        async let journal: Void = refreshDecisions()
+        await refreshSnapshot()
+        await journal
+    }
+
+    /// Polls the decision journal from the saved cursor. Errors are swallowed
+    /// on purpose; a 404 marks the feed unsupported, anything else retries.
+    public func refreshDecisions() async {
+        do {
+            applyDecisions(try await client.decisions(since: decisionCursor))
+        } catch EngineError.badStatus(404) {
+            decisionsSupported = false
+        } catch {
+            // Transient: the snapshot path reports connectivity.
+        }
+    }
+
+    /// Merges a journal page. Separate from transport for deterministic tests.
+    public func applyDecisions(_ page: DecisionPage) {
+        decisionsSupported = true
+        if let cursor = decisionCursor, page.nextSeq < cursor {
+            // The engine restarted and its sequence began again. Forget the
+            // old feed and read the new one from the start.
+            decisions = []
+            decisionsGap = false
+            decisionCursor = nil
+            return
+        }
+        if page.gap { decisionsGap = true }
+        let known = Set(decisions.map(\.seq))
+        let fresh = page.items.filter { !known.contains($0.seq) }
+        decisions = (fresh + decisions).sorted { $0.seq > $1.seq }
+        if decisions.count > decisionLimit {
+            decisions.removeLast(decisions.count - decisionLimit)
+        }
+        decisionCursor = page.nextSeq
+    }
+
+    private func refreshSnapshot() async {
         do {
             let (stats, portfolio) = try await client.snapshot()
             apply(stats: stats, portfolio: portfolio, at: Date())
