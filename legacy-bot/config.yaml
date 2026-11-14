@@ -1,0 +1,97 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  Multi-asset trading bot — runtime configuration
+#  Every tunable lives here; no magic numbers in code.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ─── dry_run ───────────────────────────────────────────────────────────────
+#  The live/paper boundary. Live trading is NOT BUILT. Setting this to false
+#  makes main.py refuse to start with a loud error. Do not flip it.
+# ───────────────────────────────────────────────────────────────────────────
+dry_run: true
+
+bot:
+  log_level: INFO
+  data_dir: ./data
+  db_path: ./data/trading.db
+  audit_log_path: ./data/audit.jsonl
+  ohlcv_cache_dir: ./data/ohlcv
+  reports_dir: ./reports
+
+universes:
+  crypto:
+    exchange: kraken               # public OHLCV, no API key required
+    timeframe: 4h
+    symbols: [BTC/USD, ETH/USD, SOL/USD, XRP/USD, ADA/USD, LINK/USD, DOT/USD, LTC/USD]
+    allow_short: true
+  equities:
+    timeframe: 1d
+    symbols: [SPY, QQQ, IWM, EFA, EEM, TLT, GLD, XLE, XLF, XLK, AAPL, MSFT, NVDA, AMZN, GOOGL]
+    allow_short: false             # long/flat only
+
+costs:
+  # Deliberately pessimistic. Round-trip cost = 2 × (fee + slippage).
+  crypto:
+    fee_bps: 26                    # kraken taker ~0.26%
+    slippage_bps: 10
+  equities:
+    fee_bps: 1                     # commission-free brokers still pay spread
+    slippage_bps: 5
+
+strategies:
+  tsmom:
+    enabled: true
+    lookback_bars:                 # per-universe momentum lookback (in bars)
+      crypto: 180                  # 4h bars ≈ 30 days
+      equities: 126                # daily bars ≈ 6 months
+    vol_lookback_bars: 30
+    target_vol_annual: 0.15        # per-position vol target
+  xsmom:
+    enabled: true
+    lookback_bars:
+      crypto: 180
+      equities: 126
+    top_n: 3
+    rebalance_every_bars:
+      crypto: 42                   # ≈ weekly on 4h bars
+      equities: 21                 # ≈ monthly
+  meanrev:
+    enabled: true
+    zscore_lookback_bars: 20
+    entry_z: 2.0
+    exit_z: 0.5
+    max_weight: 0.15
+  null_random:
+    enabled: true                  # the control — never disable during evaluation
+    seed: 42
+    rebalance_every_bars:
+      crypto: 42
+      equities: 21
+
+risk:
+  start_equity_usd: 100000         # per paper stream
+  max_position_weight: 0.25        # |weight| cap per symbol
+  max_gross_exposure: 1.5          # sum of |weights| cap
+  kill_switch_drawdown: 0.20       # halt stream at -20% from high-water mark
+
+paper:
+  poll_interval_seconds: 300       # check for new completed bars every 5 min
+  min_history_bars: 200            # bars to preload before a stream may trade
+
+walkforward:
+  train_bars: 500
+  test_bars: 125
+  step_bars: 125
+  grids:                           # params searched on train windows only
+    tsmom:
+      lookback_bars: [60, 126, 180, 252]
+    xsmom:
+      lookback_bars: [60, 126, 180]
+    meanrev:
+      entry_z: [1.5, 2.0, 2.5]
+
+gates:
+  # Criteria a stream must pass before live trading may even be DISCUSSED.
+  min_paper_days: 30
+  min_closed_trades: 50
+  max_drawdown: 0.20
+  null_test_p_value: 0.10          # must beat null_random at p < this
