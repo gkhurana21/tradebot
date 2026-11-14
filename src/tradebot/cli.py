@@ -386,6 +386,11 @@ def cmd_nulltest(a):
     print(f"Running the strategy once and its coin-flip twin {a.seeds} times...")
     res = run_nulltest(streams, _ensemble, seeds=a.seeds, cash=a.cash)
     print(res.summary())
+    if a.svg:
+        from .sim.nulltest import histogram_svg
+        with open(a.svg, "w") as f:
+            f.write(histogram_svg(res, title=f"Strategy vs {a.seeds} coin flips"))
+        print(f"Wrote {a.svg}")
 
 
 def _nulltest_claude(a, streams):
@@ -564,6 +569,7 @@ def main(argv=None):
     nt.add_argument("--bars", type=int, default=1500, help="synthetic only")
     nt.add_argument("--seeds", type=int, default=199)
     nt.add_argument("--cash", type=float, default=25_000.0)
+    nt.add_argument("--svg", default=None, help="also write a histogram of the coin-flip returns")
     nt.add_argument("--brain", choices=["heuristic", "claude"], default="heuristic")
     nt.add_argument("--model", choices=sorted(_MODELS), default="haiku", help="claude brain only")
     nt.add_argument("--start", default=None, help="UTC date, inclusive")
