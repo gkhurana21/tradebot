@@ -28,7 +28,8 @@ between them because there is no concurrent access — the design removes the
 data-race class rather than defending against it. Verified with `-race`.
 
 **Backpressure is explicit.** Market data is dropped when the buffer is full
-(a stale price is worse than a missing one); decisions block with a caller
+(a stale price is worse than a missing one) unless the caller asked for
+`?wait=1`, in which case a full buffer is a `503`; decisions block with a caller
 context so the client controls its own timeout; telemetry is dropped rather
 than allowed to stall trading.
 
@@ -52,13 +53,57 @@ curl -X POST localhost:8080/decision -d '{"symbol":"BTC-USD","side":"BUY","confi
 curl localhost:8080/positions
 ```
 
+The server binds `127.0.0.1:8080` by default (there is no authentication, so it
+is loopback-only); pass `-addr :8080` to expose it deliberately.
+
 | Endpoint | Purpose |
 |---|---|
-| `POST /tick` | market data; also drives stop/target monitoring |
-| `POST /decision` | proposal in, risk verdict + sized order out |
-| `GET /positions` | equity, cash, open positions |
-| `GET /stats` | cumulative counters, halt state |
-| `GET /health` | liveness |
+| `POST /tick` | market data; also drives stop/target monitoring. Async: `202`, and the tick is dropped if the buffer is full |
+| `POST /tick?wait=1` | same, but applied by the owner goroutine before the reply: `{equity, halted, exits:[{ts, symbol, side, qty, price, fee, reason}]}`. `503` when the tick buffer is full (never a silent drop) |
+| `POST /decision` | proposal in, risk verdict + sized order out. Optional `client_id` (idempotency) and `expect_boot_id` (restart guard); response adds `client_id` and `fills` |
+| `GET /decisions?since=<seq>` | journal of the last 256 decisions, exits and halts (see below) |
+| `GET /positions` | equity, cash, open positions, each with `mark` and `unrealized_pnl` |
+| `GET /stats` | cumulative counters, halt state, `venue`/`live`, `session_start_equity`, `limits` |
+| `GET /health` | `{status, uptime, api: 2, boot_id, venue, live}` |
+
+### Bridge contract (`api: 2`)
+
+- **`boot_id`** is random hex drawn at startup. A client that sends it back as
+  `expect_boot_id` on `POST /decision` gets `409` (before anything is
+  evaluated) if the engine restarted in between.
+- **`client_id`** (max 128 bytes) is recorded when the decision arrives, in a
+  bounded map of the last 4096 ids. A repeat returns the stored result (waiting
+  for the original if it is still in flight, and with `"replayed": true`) and
+  never places a second order, even if the first HTTP request timed out.
+- **`fills`** lists every fill the decision caused, in order: the close leg of a
+  flip (`reason: "flip"`) and then the entry. Rejections return `[]`. These are
+  fills in the book's sense; the flip close still counts as an exit in `/stats`.
+- **Decision timeout** is `5 s` in simulation. With a venue it is
+  `2 x 10 s + 2 s`: a flip is a close and a place, each bounded to 10 s
+  (venue retries run inside that bound). The HTTP `WriteTimeout` is derived
+  from it.
+- **`/stats.limits`** carries the configured fractions (`0.05` is 5%).
+  `session_start_equity` is the kill-switch baseline; the session is the
+  process lifetime (no day roll).
+- **Reasons** carry the numbers: `confidence 0.30 < min 0.55`,
+  `position at max notional 20%`, `max open positions 3 reached`,
+  `halted: daily drawdown 5.2% ≥ 5%`, `sized 0.078 BTC-USD · risk 1.0% to stop`.
+  The typed `verdict` values are unchanged.
+
+### Decision journal
+
+`GET /decisions?since=<seq>` returns
+`{"next_seq", "oldest_seq", "gap", "items": [...]}` from a 256-entry ring that
+only the owner goroutine writes. Items have `seq` (from 1), `at` (engine wall
+clock, RFC3339Nano), `kind` (`decision`, `exit` or `halt`), `reason`, and, where
+they apply, `client_id`, `symbol`, `side`, `confidence`, `verdict`, `approved`,
+`qty`, `price`. `exit` covers bracket exits and flip close legs; `halt` is
+written once, when the kill switch trips.
+
+`since` is inclusive: it returns items with `seq >= since`, so a poller passes
+the previous `next_seq`. Omit it to read everything retained. `gap` is `true`
+when entries the caller asked for were overwritten (`since < oldest_seq` after
+the ring has wrapped); the items returned then start at `oldest_seq`.
 
 ## Benchmarks
 
