@@ -20,7 +20,7 @@ func (e *Engine) Explain(d types.Decision, acct Account, price float64, res Resu
 		}
 		risked := math.Abs(res.Order.Qty) * price * e.cfg.StopLossPct / acct.Equity * 100
 		return "sized " + sig3(math.Abs(res.Order.Qty)) + " " + d.Symbol +
-			" · risk " + strconv.FormatFloat(risked, 'f', 1, 64) + "% to stop"
+			" · risk " + riskPct(risked) + "% to stop"
 	case RejectHalted:
 		return "halted: daily drawdown " + strconv.FormatFloat(e.Drawdown(acct.Equity)*100, 'f', 1, 64) +
 			"% ≥ " + pct(e.cfg.MaxDailyDrawdownPct) + "%"
@@ -66,4 +66,17 @@ func sig3(v float64) string {
 		decimals = 12
 	}
 	return strconv.FormatFloat(v, 'f', decimals, 64)
+}
+
+// riskPct keeps small top-ups readable: "0.4" for normal entries, "0.03" or
+// "<0.01" for the slivers the size cap allows, instead of a misleading "0.0".
+func riskPct(p float64) string {
+	switch {
+	case p >= 0.1:
+		return strconv.FormatFloat(p, 'f', 1, 64)
+	case p >= 0.01:
+		return strconv.FormatFloat(p, 'f', 2, 64)
+	default:
+		return "<0.01"
+	}
 }

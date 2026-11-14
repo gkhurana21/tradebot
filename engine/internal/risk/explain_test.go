@@ -123,3 +123,11 @@ func TestSessionStartEquity(t *testing.T) {
 		t.Fatalf("after start = %v", got)
 	}
 }
+
+func TestRiskPctNeverShowsZero(t *testing.T) {
+	for in, want := range map[float64]string{0.4: "0.4", 1: "1.0", 0.034: "0.03", 0.004: "<0.01"} {
+		if got := riskPct(in); got != want {
+			t.Errorf("riskPct(%v) = %q, want %q", in, got, want)
+		}
+	}
+}

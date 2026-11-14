@@ -61,9 +61,12 @@ recover.
 at the stop.
 
 **Why.** Open-high-low-close data can't say which came first. Assuming the favorable one would inflate every
-backtest with a volatile bar. Stops in backtests fill at the stop price; the Go engine and the live loop exit on
-the tick that crosses it, so live fills can be worse. That difference is intentional and is why backtest results
-are an upper bound.
+backtest with a volatile bar.
+
+**Where exits fill.** Backtests and the Go engine's simulated venue fill a touched stop or target at that level
+plus slippage. The local Python live loop (no engine) exits at the bar's close plus slippage, which can be worse.
+A real market can gap straight through a stop, so every simulated result here is an upper bound on what a live
+venue would give.
 
 ## 7. The coin-flip test randomises position chains, not trades
 
@@ -100,9 +103,9 @@ results stand in for the Go gate. Known differences are listed here before the t
   (`_risk()` in `cli.py`); Go's profile fixes it at 3. The fixtures pass the limit explicitly.
 - **Sessions.** The kill-switch arithmetic is identical (drawdown from the session's starting equity, `>=` the
   limit); the fixtures cover it. What differs is when a session starts (record 4).
-- **Fills.** Sizing is the same; fills are not. Python's paper broker fills exits at the bar's close and
-  models its own slippage and fees; Go fills a stop or target at the bracket level plus slippage (record 6).
-  Parity covers sizing and approval only.
+- **Fills.** Sizing is the same; fills are not always. Python backtests and Go both fill a stop or target at
+  its level plus slippage; the local Python live loop exits at the bar's close (record 6). Fee and slippage
+  defaults are set separately in each engine. Parity covers sizing and approval only.
 
 Everything else in the sizing path is the same formula: fixed-fractional risk to the stop, capped by max
 notional, scaled by `size_hint`, minus same-side exposure already held, with the stop and target at fixed

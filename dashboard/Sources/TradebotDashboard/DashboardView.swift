@@ -439,10 +439,12 @@ private struct DecisionRow: View {
         .padding(.vertical, 8)
     }
 
+    /// "Stop at 32,787.55". The engine's reason ("stop: closed BTC-USD @ 32787.55")
+    /// already names the symbol and price, so only its kind is kept.
     private var exitDetail: String {
-        var parts = [item.displayReason]
-        if let price = item.price { parts.append("@ " + price.formatted(.number.precision(.fractionLength(2)))) }
-        return parts.filter { !$0.isEmpty }.joined(separator: " ")
+        let kind = item.reason.split(separator: ":").first.map { String($0).capitalized } ?? "Exit"
+        guard let price = item.price else { return item.displayReason }
+        return "\(kind) at " + price.formatted(.number.precision(.fractionLength(2)))
     }
 
     private var helpText: String {

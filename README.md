@@ -2,7 +2,7 @@
 
 # tradebot
 
-### A trading system where the AI proposes and a 104-nanosecond risk gate decides.
+### A trading system where the AI proposes and a separate risk gate decides.
 
 *Python researches. Go executes. SwiftUI watches. Claude never touches an order directly.*
 
@@ -19,10 +19,10 @@
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?style=flat-square&logo=swift&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude-brain%20%2B%20MCP-D97757?style=flat-square&logo=anthropic&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-185%20%2B%20116%20Swift%20checks-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
-[What it does](#-what-it-does) • [Coin-flip test](#-does-it-beat-a-coin-flip) • [Architecture](#%EF%B8%8F-architecture) • [Try it](#-try-it-in-one-command) • [Under the hood](#-under-the-hood)
+[What it does](#-what-it-does) • [Coin-flip test](#-does-it-beat-a-coin-flip) • [Architecture](#%EF%B8%8F-architecture) • [Design decisions](docs/DESIGN.md) • [Try it](#-try-it-in-one-command)
 
 </div>
 
@@ -31,14 +31,14 @@
 > and nothing trades real money unless you pass two separate live flags yourself.
 
 > [!NOTE]
-> **Status: finished and frozen.** This was my showcase trading system. My active research has moved on; the
-> code here stays as a complete, tested reference.
+> **Status: complete, paper only.** A portfolio project. It is maintained, but not being developed toward live
+> trading. The design choices and their trade-offs are written up in [docs/DESIGN.md](docs/DESIGN.md).
 
 ---
 
 ## The problem
 
-LLMs are good at reading a chart and arguing a case. They are also confidently wrong, and a trading bot that lets
+LLMs are good at summarising market context and arguing a case. They are also confidently wrong, and a trading bot that lets
 a model place orders is one hallucination away from a blown account. Most "AI trading" projects either trust the
 model completely or bolt a few `if` checks onto the same process, where one bug can skip them.
 
@@ -52,14 +52,15 @@ research-side bug cannot reach the market without passing the gate, because the 
   <img src="docs/screenshots/dashboard-demo.gif" width="720"
        alt="The SwiftUI dashboard updating live: equity rising, three positions opening, and one low-confidence proposal rejected by the risk gate"/>
 </p>
-<p align="center"><sub>The native dashboard watching the Go engine in <b>SIM</b> mode, fed by a
-<a href="docs/tools/demo_driver.py">scripted driver</a> with made-up prices. The fills and the rejection are the engine's own.</sub></p>
+<p align="center"><sub>A real run, sped up 2.5×: the Python strategy (heuristic brain, synthetic prices) proposing
+through <code>tradebot live --engine</code>, and the Go gate approving, sizing, blocking and exiting in <b>SIM</b>
+mode. Every row in the feed is the engine's own verdict and reason.</sub></p>
 
 <table>
 <tr>
-<td align="center" width="25%"><h3>104 ns</h3><sub>per risk-gate check, 0 allocations, race-tested</sub></td>
+<td align="center" width="25%"><h3>105 ns</h3><sub>per risk check in the Go gate, 0 allocations; 0.3 ms per decision from Python over HTTP</sub></td>
 <td align="center" width="25%"><h3>p = 0.15</h3><sub>out-of-sample against 199 coin-flip twins: no proven edge, and it says so</sub></td>
-<td align="center" width="25%"><h3>130</h3><sub>tests across Go, Python and Swift, plus a cross-language CI job</sub></td>
+<td align="center" width="25%"><h3>185</h3><sub>tests in Go and Python, 116 Swift checks, and a CI job that drives Python → Go → Swift end to end</sub></td>
 <td align="center" width="25%"><h3>2 flags</h3><sub>needed for real money, so one typo never trades it</sub></td>
 </tr>
 </table>
@@ -76,16 +77,16 @@ max open positions and a daily-drawdown kill switch. Rejections are typed values
 Recovering equity does not clear a halt; only a new session does (the next UTC day in Python, a restart in the Go engine).</td>
 </tr>
 <tr>
-<td><b>📈 Honest backtesting.</b> The backtest runs the exact code path a live run would. Walk-forward optimization
-scores parameters out-of-sample. A bar that touches both stop and target resolves as the stop, because assuming the
-favorable fill would inflate every result.</td>
+<td><b>📈 Honest backtesting.</b> Backtests share the strategy, brain and risk code with the live loop. Walk-forward
+optimization scores parameters out-of-sample. A bar that touches both stop and target resolves as the stop. A real market can gap through a
+stop, so simulated results are an upper bound (<a href="docs/DESIGN.md">DESIGN</a> #6).</td>
 <td><b>🎲 The "$1 → $1M" reality check.</b> A Monte Carlo of thousands of simulated traders. With a real 55% edge,
 careful sizing usually compounds. With the same edge and aggressive sizing, the median trader ends at $0.02.</td>
 </tr>
 <tr>
-<td><b>🔌 Real broker, behind the gate.</b> An Alpaca venue with paper and live modes: env-only credentials,
-reconciliation on startup, idempotency keys on every order, no retries on 4xx, and venue limits enforced before an
-order is sent.</td>
+<td><b>🔌 Fails closed.</b> Python refuses to drive an engine that isn't in SIM mode. A timeout means
+"unknown", never "no trade": the decision is re-sent under the same <code>client_id</code>, which the engine
+de-duplicates. An engine restart mid-run stops Python. CI kills the engine mid-run and checks nothing trades after.</td>
 <td><b>🤖 Claude can drive it.</b> An MCP bridge lets any Claude session run backtests, sweep a parameter and draw
 equity curves, all read-only against the paper broker. A TradingView webhook routes Pine alerts through the same
 brain and gate.</td>
@@ -104,6 +105,7 @@ A backtest return means little on its own. The real question is whether the stra
   coin-flip runs that did at least as well.
 - **Out-of-sample data:** Coinbase hourly bars for BTC, ETH and SOL from 2026-08-15 to 2026-10-31. The strategy code
   last changed on 2026-08-14. The bars are committed in [`docs/data`](docs/data), so anyone gets the same answer.
+  The risk engine's kill switch was fixed later (2026-11-14); the result below reproduces exactly at `d0bba99`.
 
 | | Total return | Round trips |
 |---|---|---|
@@ -114,18 +116,26 @@ A backtest return means little on its own. The real question is whether the stra
 
 **Verdict: no evidence of skill.** It lost less than the typical coin flip, but 15% of coin flips did as
 well. The tests sanity-check the method rather than measure its power: it flags a planted look-ahead
-edge, and on runs with no edge it doesn't report significance more often than it should.
-
-```bash
-tradebot nulltest --source snapshot --seeds 199      # ~2 minutes, all cores, no API calls
-```
+edge, and on runs with no edge it doesn't report significance more often than it should. Like all backtests,
+this uses the Python risk engine; a shared parity test checks it sizes every order exactly as the Go gate does.
 
 <p align="center">
-  <img src="docs/screenshots/backtest-report.png" width="720"
-       alt="HTML backtest report: four tiles, an equity curve bleeding to minus 40 percent with drawdown shading and kill-switch markers"/>
+  <img src="docs/screenshots/coinflip.svg" width="720"
+       alt="Histogram of 199 coin-flip returns from minus 40 to minus 14 percent, with the strategy marked at minus 24.99 percent, p = 0.150"/>
 </p>
-<p align="center"><sub>The HTML report on synthetic data: −40% over 979 trades after fees, with drawdown shaded and the
-two days the kill switch fired marked in red. The kill switch caps a bad day; it cannot create an edge.</sub></p>
+
+```bash
+tradebot nulltest --source snapshot --seeds 199 --svg coinflip.svg   # ~2 minutes, all cores, no API calls
+```
+
+### Next: does *Claude* beat a coin flip? (pre-registered, not yet run)
+
+The same test with the Claude brain (Haiku 5.5) making the decisions. Everything is fixed in
+[the pre-registration](docs/claude-test-preregistration.md) **before** any paid call: two co-primary tests at
+α = 0.025 each, a failure rule, and "one run, no reruns". The prompt is account-free, so all 4,590 prompts are
+built offline and the whole batch's worst-case cost is computed exactly before sending: **$0.51**, under a hard $1
+cap. Claude's agreement rate with the strategy's own signal is reported first, so a Claude that just echoes the
+signal can't take credit for the strategy. The data window starts after Haiku 5.5's training cutoff (June 2026).
 
 ## 🏗️ Architecture
 
@@ -149,9 +159,21 @@ two days the kill switch fired marked in red. The kill switch caps a bad day; it
 | [MCP bridge](mcp) | Python | lets Claude run backtests, sweeps and charts. Read-only |
 | [legacy-bot](legacy-bot) | Python | the July 2026 predecessor, kept for its statistical decision gate (below) |
 
+**Which paths go through Go.** `tradebot live --engine URL` sends every decision to the Go gate, which sizes,
+approves, fills and exits; Python keeps no book and runs no sizing of its own on that path. Backtests, the
+coin-flip test and plain `tradebot live` run the same rules in the Python risk engine, so they work without the
+engine running; a shared fixture file checks both engines give the same verdict and size on every case.
+
 **Why the split.** Research is IO-bound and exploratory: it calls an LLM, replays history and tolerates seconds of
 latency. Execution is the opposite: fast, deterministic and impossible to bypass by accident. In the engine, one
-goroutine owns all state, so there are no locks because there is no shared access.
+goroutine owns all state, so there are no locks because there is no shared access. Independent pre-trade controls
+are also what regulators require of brokers (SEC Rule 15c3-5); [DESIGN.md](docs/DESIGN.md) has the reasoning.
+
+| Latency | Measured |
+|---|---|
+| Risk check inside the Go gate (`BenchmarkEvaluate`) | 105 ns, 0 allocations (best of 3, Apple M3) |
+| Full engine pipeline incl. channel hop (`BenchmarkPipeline`) | 1.9 µs, 7 allocations |
+| Python → Go decision over HTTP, loopback | p50 0.31 ms, p99 2.7 ms (one local run, 176 decisions) |
 
 ## ⚡ Try it in one command
 
@@ -163,13 +185,22 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[llm]"
 
 The demo runs the whole system end to end: chart analysis on real BTC data, backtests at three risk levels, a
 multi-symbol portfolio, walk-forward optimization, the Monte Carlo, a live paper loop and an HTML report. It is free
-unless you give it an Anthropic API key, and then only one step calls Claude, capped at 50 Haiku calls (about 3 cents).
+unless you give it an Anthropic API key, and then only one step calls Claude, capped at 50 Haiku calls (well under a cent).
+
+Run Python through the Go gate and watch it in the dashboard:
+
+```bash
+cd engine && go run ./cmd/engine -cash 25000 -profile conservative      # terminal 1: the gate (SIM)
+cd dashboard && ./run.sh                                                # terminal 2: the monitor
+tradebot live --engine http://127.0.0.1:8080 --source synthetic \
+              --symbols BTC-USD --iterations 90 --poll 0.5 --no-llm      # terminal 3: the strategy
+```
 
 Run each component's tests:
 
 ```bash
-cd engine    && go test -race ./...                 # Go: risk gate, book, engine, venue
-cd dashboard && ./test.sh                           # Swift: decoding, polling, derived metrics
+cd engine    && go test -race ./...                 # Go: risk gate, book, engine, venue, API, parity
+cd dashboard && ./test.sh                           # Swift: decoding, feed, polling, derived metrics
 PYTHONPATH=src python3 tests/test_core.py           # Python: strategies, risk, brokers, simulators
 ```
 
@@ -190,6 +221,7 @@ tradebot compare --symbol BTC-USD                     # free heuristic vs Claude
 tradebot portfolio --onchain                          # 3-symbol ensemble + on-chain context
 tradebot optimize --bars 2000 --folds 4               # walk-forward parameter search
 tradebot live --iterations 400 --poll 0               # live paper loop (streams JSON events)
+tradebot live --engine http://127.0.0.1:8080 ...      # same loop, every decision through the Go gate
 tradebot webhook --secret YOURSECRET                  # TradingView alert receiver
 tradebot dashboard --out dashboard.html               # HTML report
 tradebot breakeven                                    # win rate needed to beat fees
@@ -235,7 +267,8 @@ The brain can also be **news-aware** (`Brain(news_aware=True)`): Claude web-sear
 
 Each signal is one Claude API call, so spend is capped:
 
-- `--model opus|sonnet|haiku`: Haiku is about $0.0015 a call against Opus at about $0.007.
+- `--model opus|sonnet|haiku`: Haiku 5.5 costs roughly $0.0001 a call (at most $0.0002 with the 200-token
+  reply cap); Opus 5.5 costs about 40× that.
 - `--max-llm-calls N`: after N calls the run finishes on the free heuristic.
 - Every LLM run prints its actual spend: `LLM calls: 34  tokens in/out: … est. spend: $0.24`.
 
@@ -261,9 +294,9 @@ exist to hunt for one honestly.
 
 | Benchmark | Latency | Allocations |
 |---|---|---|
-| Risk gate (`Evaluate`) | **104 ns/op** | **0 B, 0 allocs** |
-| Risk gate, parallel | 122 ns/op | 0 B, 0 allocs |
-| Full pipeline (incl. channel hop) | 1.66 µs/op | 864 B, 4 allocs |
+| Risk gate (`Evaluate`) | **105 ns/op** | **0 B, 0 allocs** |
+| Risk gate, parallel | 121 ns/op | 0 B, 0 allocs |
+| Full pipeline (incl. channel hop) | 1.9 µs/op | 1,106 B, 7 allocs |
 
 ```bash
 go run ./cmd/engine -venue sim            # default: simulated fills, no account
@@ -271,10 +304,22 @@ go run ./cmd/engine -venue alpaca-paper   # real order lifecycle, no money
 go run ./cmd/engine -venue alpaca-live -i-understand-this-trades-real-money
 ```
 
-Market data is dropped when the buffer is full (a stale price is worse than a missing one), and a failed close never
+Best of three runs on an Apple M3. Market data is dropped when the buffer is full (a stale price is worse than a
+missing one); a caller that needs the price applied first uses `POST /tick?wait=1`, which answers 503 instead. A failed close never
 updates the book, so risk never believes a position is flat while the broker still holds it. The Alpaca wire format
 is tested against a stubbed transport but has not been smoke-tested against a live account. Full design notes are in
 [engine/README.md](engine/README.md).
+
+### The HTML report
+
+<p align="center">
+  <img src="docs/screenshots/backtest-report.png" width="720"
+       alt="HTML backtest report: four tiles, an equity curve bleeding to minus 40 percent with drawdown shading and kill-switch markers"/>
+</p>
+
+`tradebot dashboard` writes a self-contained report (also published as the [live demo](https://gkhurana21.github.io/tradebot/)).
+On synthetic data the default strategy loses 40% over 979 trades after fees; the shading is drawdown from peak and
+the red ticks are the two days the kill switch fired. The kill switch caps a bad day; it cannot create an edge.
 
 ### The MCP bridge
 
@@ -302,12 +347,14 @@ trading was never built there.
 
 | Suite | Command | Count |
 |---|---|---|
-| Go | `cd engine && go test -race ./...` | 46 tests + 3 benchmarks |
-| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py` | 25 + 13 + 7 tests |
-| Swift | `cd dashboard && ./test.sh` | 39 checks |
+| Go | `cd engine && go test -race ./...` | 85 tests + 3 benchmarks |
+| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py`, `test_claudetest.py`, `test_bridge.py`, `test_risk_parity.py` | 28 + 13 + 7 + 29 + 22 + 1 (27 shared fixtures) |
+| Swift | `cd dashboard && ./test.sh` | 116 checks in 24 suites |
 
-CI runs all three on every push, plus an **integration job** that starts the Go engine, drives a trade through the
-risk gate and probes it with the Swift client: the cross-language seam unit tests cannot cover.
+CI runs all three on every push, plus two cross-language jobs. The **bridge** job starts the Go engine, runs the
+Python strategy against it for 300 bars, and checks Python's record against the engine's own: every decision, every
+fill (flips as two legs) and every exit. The Swift client reads the same numbers, then the engine is killed mid-run
+and Python must stop with exit code 2 and no further trades.
 
 ### Layout
 
@@ -317,15 +364,18 @@ risk gate and probes it with the Swift client: the cross-language seam unit test
 | `src/tradebot/brain/` | single-call brain and LangGraph research graph |
 | `src/tradebot/brokers/` | broker interface and paper broker (fees, slippage) |
 | `src/tradebot/backtest/` | single-symbol and portfolio backtesters, walk-forward optimizer, HTML report |
-| `src/tradebot/live/` | live paper loop and TradingView webhook |
-| `src/tradebot/sim/` | Monte Carlo, break-even and coin-flip (null-random) tests |
+| `src/tradebot/live/` | live loop, the Python/Go gate seam (`gate.py`) and TradingView webhook |
+| `src/tradebot/sim/` | Monte Carlo, break-even, coin-flip test, and the Claude coin-flip harness |
 | `src/tradebot/data/` | synthetic, Coinbase and CSV feeds; on-chain signals |
 | `engine/` | Go execution engine |
 | `dashboard/` | SwiftUI monitor |
 | `mcp/` | MCP bridge |
 | `legacy-bot/` | July 2026 predecessor |
 | `docs/data/` | the committed Coinbase snapshot behind the coin-flip result |
-| `docs/tools/` | the scripted driver behind the dashboard GIF |
+| `docs/DESIGN.md` | design decisions and their trade-offs |
+| `docs/claude-test-preregistration.md` | the frozen plan for the Claude coin-flip test |
+| `tests/fixtures/risk_parity.json` | cases both risk engines must agree on |
+| `docs/tools/` | a scripted demo driver for the dashboard |
 
 </details>
 
