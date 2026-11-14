@@ -183,3 +183,54 @@ def run_nulltest(
         start=f"{min(all_ts):%Y-%m-%d}" if all_ts else "",
         end=f"{max(all_ts):%Y-%m-%d}" if all_ts else "",
     )
+
+
+def _run_twin(job) -> "_NullRun":
+    streams, strategy_factory, twin_factory, risk_cfg, cash, seed = job
+    r = _run(streams, strategy_factory, twin_factory(seed), risk_cfg, cash)
+    return _NullRun(r.total_return_pct, r.metrics.n_trades)
+
+
+def run_twins(
+    streams: dict[str, list[Candle]],
+    strategy_factory: Callable[[], Strategy],
+    real_brain_factory: Callable[[], Brain],
+    twin_factory: Callable[[int], object],
+    risk_cfg: RiskConfig | None = None,
+    cash: float = 25_000.0,
+    seeds: int = 199,
+    first_seed: int = 1,
+    workers: int | None = None,
+) -> NullTestResult:
+    """Like run_nulltest, but the twins are whatever `twin_factory(seed)` builds.
+
+    run_nulltest's twin is fixed (the real brain with each position chain's
+    direction sign-randomised). This one takes any seeded twin, so a different
+    null, such as random vetoes and flips, shares the same p-value arithmetic
+    and the same fees, slippage, candles and risk engine. Factories must be
+    module-level callables so runs can go to worker processes.
+    """
+    risk_cfg = risk_cfg or RiskConfig(max_open_positions=max(3, len(streams)))
+    real = _run(streams, strategy_factory, real_brain_factory(), risk_cfg, cash)
+    jobs = [(streams, strategy_factory, twin_factory, risk_cfg, cash, first_seed + k)
+            for k in range(seeds)]
+    if workers is None:
+        workers = min(len(jobs), os.cpu_count() or 1)
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            nulls = list(pool.map(_run_twin, jobs, chunksize=max(1, len(jobs) // (workers * 4))))
+    else:
+        nulls = [_run_twin(j) for j in jobs]
+    all_ts = [c.ts for cs in streams.values() for c in cs]
+    return NullTestResult(
+        real_return_pct=real.total_return_pct,
+        null_returns_pct=[n.total_return_pct for n in nulls],
+        p_value=empirical_p(real.total_return_pct, [n.total_return_pct for n in nulls]),
+        real_trades=real.metrics.n_trades,
+        null_median_trades=statistics.median(n.n_trades for n in nulls),
+        real_win_rate_pct=real.metrics.win_rate_pct,
+        bars=max(len(cs) for cs in streams.values()),
+        symbols=list(streams),
+        start=f"{min(all_ts):%Y-%m-%d}" if all_ts else "",
+        end=f"{max(all_ts):%Y-%m-%d}" if all_ts else "",
+    )

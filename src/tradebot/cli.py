@@ -41,8 +41,8 @@ def _risk(a) -> RiskConfig:
     return cfg
 
 
-_MODELS = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5",
-           "haiku": "claude-haiku-4-5"}
+_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
+           "haiku": "claude-haiku-5-5"}
 
 
 def _brain(a):
@@ -319,8 +319,14 @@ def cmd_snapshot(a):
         print(f"{sym}: {len(bars)} hourly bars -> {path}")
 
 
+def _utc(text):
+    from datetime import datetime, timezone
+    dt = datetime.fromisoformat(text)
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
 def cmd_nulltest(a):
-    """Does the strategy beat trading the same moments in random directions?"""
+    """Does the strategy (or the Claude brain) beat trading the same moments at random?"""
     import os
     from .sim.nulltest import run_nulltest
     symbols = _split(a.symbols)
@@ -332,9 +338,76 @@ def cmd_nulltest(a):
             raise SystemExit(f"No snapshot for {', '.join(missing)} in {a.data!r}. Run from the repo "
                              f"root, pass --data, or create one with `tradebot snapshot`.")
         streams = {s: feed.csv_candles(os.path.join(a.data, f"{s}-1h.csv"), s) for s in symbols}
+    if a.start or a.end:
+        from .sim.claudetest import slice_streams
+        streams = slice_streams(streams, _utc(a.start) if a.start else None,
+                                _utc(a.end) if a.end else None)
+    if a.brain == "claude":
+        return _nulltest_claude(a, streams)
     print(f"Running the strategy once and its coin-flip twin {a.seeds} times...")
     res = run_nulltest(streams, _ensemble, seeds=a.seeds, cash=a.cash)
     print(res.summary())
+
+
+def _nulltest_claude(a, streams):
+    """The Claude coin-flip test. Everything here is free except --submit-batch
+    and --collect, which are the only paths that touch the network."""
+    import os
+    from decimal import Decimal
+    from .sim import claudetest as ct
+    model = _MODELS[a.model]
+    window = (f"{a.start or 'snapshot start'} to {a.end or 'snapshot end'} (end exclusive), "
+              f"{', '.join(streams)}")
+    prompts_path, cache_path = a.prompts, a.cache
+    cap = Decimal(a.cap)
+    try:
+        ct.require_testable(model)
+        if a.build_prompts:
+            prompts = ct.build_prompts(streams, _ensemble, model, cash=a.cash)
+            sha = ct.write_prompts(prompts, prompts_path)
+            print(f"Built {len(prompts)} account-free prompts ({model}, prompt {ct.PROMPT_VERSION}, "
+                  f"hash {ct.PROMPT_HASH}) -> {prompts_path}\n  sha256 {sha}")
+            print("Cost bound: " + ct.cost_bound(prompts, model).summary())
+            if a.fill_prereg:
+                n = ct.fill_preregistration(a.fill_prereg, model, prompts, sha, window, cap)
+                print(f"Filled {n} placeholders in {a.fill_prereg}")
+            return
+        if a.fill_prereg:
+            raise SystemExit("--fill-prereg goes with --build-prompts")
+        if a.submit_batch or a.collect or a.dry_run:
+            if not os.path.exists(prompts_path):
+                raise SystemExit(f"No prompts at {prompts_path}; run with --build-prompts first.")
+            prompts = ct.read_prompts(prompts_path)
+        if a.submit_batch or a.dry_run:
+            todo = ct.pending_prompts(prompts, cache_path) if os.path.exists(cache_path) else prompts
+            if a.pilot is not None:
+                todo = todo[:a.pilot]
+            bound = ct.cost_bound(todo, model)
+            print("Cost bound: " + bound.summary() + f" · cap ${cap}")
+            if a.dry_run:
+                ct.enforce_cap(bound, cap)
+                print("Dry run: within the cap, nothing sent.")
+                return
+            res = ct.submit_batch(prompts, cache_path, ct.AnthropicBatchClient(), model,
+                                  cap=cap, pilot=a.pilot)
+            print(f"Submitted batch {res.batch_id}: {res.n_requests} requests"
+                  f"{' (pilot)' if res.pilot else ''}. Run --collect when it has ended.")
+            return
+        if a.collect:
+            res = ct.collect(prompts, cache_path, ct.AnthropicBatchClient(), model,
+                             wait=not a.no_wait)
+            print(f"{res.status}: {res.n_results} results · spend so far ${res.spend_usd:.6f} "
+                  f"(tool counter)")
+            if res.status == "collected":
+                print(f"Cache sha256 {res.cache_sha256}\n" + ct.rates_report(res.rates))
+            return
+        if not os.path.exists(cache_path):
+            raise SystemExit(f"No decision cache at {cache_path}; build prompts, submit and collect first.")
+        print(f"Replaying {cache_path} against {a.seeds} + {a.seeds} twins (no API calls)...")
+        print(ct.run_claude_test(streams, _ensemble, cache_path, model,
+                                 seeds=a.seeds, cash=a.cash).summary())
+    except (ct.CapExceeded, ct.InvalidRun, ct.CacheMiss, ct.CacheMismatch, ValueError) as e:
+        raise SystemExit(str(e))
 
 
 def _print_mode(a):
@@ -444,6 +517,27 @@ def main(argv=None):
     nt.add_argument("--bars", type=int, default=1500, help="synthetic only")
     nt.add_argument("--seeds", type=int, default=199)
     nt.add_argument("--cash", type=float, default=25_000.0)
+    nt.add_argument("--brain", choices=["heuristic", "claude"], default="heuristic")
+    nt.add_argument("--model", choices=sorted(_MODELS), default="haiku", help="claude brain only")
+    nt.add_argument("--start", default=None, help="UTC date, inclusive")
+    nt.add_argument("--end", default=None, help="UTC date, exclusive")
+    nt.add_argument("--prompts", default="docs/claude/prompts.jsonl")
+    nt.add_argument("--cache", default="docs/claude/decisions.jsonl",
+                    help="decision cache (JSONL); the ledger and sha256 sit beside it")
+    nt.add_argument("--build-prompts", action="store_true", dest="build_prompts",
+                    help="free: build every prompt offline, write --prompts, print the cost bound")
+    nt.add_argument("--pilot", type=int, nargs="?", const=50, default=None,
+                    help="submit only the first N prompts (default 50)")
+    nt.add_argument("--submit-batch", action="store_true", dest="submit_batch",
+                    help="PAID: submit one Message Batch (refuses above --cap)")
+    nt.add_argument("--collect", action="store_true", help="PAID path: fetch batch results into --cache")
+    nt.add_argument("--no-wait", action="store_true", dest="no_wait",
+                    help="with --collect: check once instead of polling until the batch ends")
+    nt.add_argument("--cap", default="1.00", help="refuse to submit above this many USD")
+    nt.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="print the cost bound and check the cap; no network")
+    nt.add_argument("--fill-prereg", default=None, dest="fill_prereg",
+                    help="with --build-prompts: fill placeholders in the pre-registration doc")
     nt.set_defaults(func=cmd_nulltest)
 
     args = p.parse_args(argv)
