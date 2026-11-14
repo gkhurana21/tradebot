@@ -77,6 +77,16 @@ public struct EngineStats: Codable, Sendable, Equatable {
     public let exits: UInt64
     public let halted: Bool
     public let equity: Double
+    /// Where approved orders go: "sim", or a venue name like "alpaca-paper".
+    public let venue: String
+    /// True only when orders risk real money.
+    public let live: Bool
+
+    /// What the operator most needs to know about this engine, at a glance.
+    public var mode: VenueMode {
+        if live { return .live }
+        return venue == "sim" ? .sim : .paper
+    }
 
     /// Share of decisions the risk gate turned away.
     ///
@@ -89,7 +99,8 @@ public struct EngineStats: Codable, Sendable, Equatable {
 
     public init(ticks: UInt64 = 0, decisions: UInt64 = 0, fills: UInt64 = 0,
                 rejected: UInt64 = 0, exits: UInt64 = 0,
-                halted: Bool = false, equity: Double = 0) {
+                halted: Bool = false, equity: Double = 0,
+                venue: String = "sim", live: Bool = false) {
         self.ticks = ticks
         self.decisions = decisions
         self.fills = fills
@@ -97,7 +108,33 @@ public struct EngineStats: Codable, Sendable, Equatable {
         self.exits = exits
         self.halted = halted
         self.equity = equity
+        self.venue = venue
+        self.live = live
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case ticks, decisions, fills, rejected, exits, halted, equity, venue, live
+    }
+
+    /// `venue` and `live` arrived after the first release of the engine API, so
+    /// an older engine that omits them still decodes, reported as simulated.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ticks = try c.decode(UInt64.self, forKey: .ticks)
+        decisions = try c.decode(UInt64.self, forKey: .decisions)
+        fills = try c.decode(UInt64.self, forKey: .fills)
+        rejected = try c.decode(UInt64.self, forKey: .rejected)
+        exits = try c.decode(UInt64.self, forKey: .exits)
+        halted = try c.decode(Bool.self, forKey: .halted)
+        equity = try c.decode(Double.self, forKey: .equity)
+        venue = try c.decodeIfPresent(String.self, forKey: .venue) ?? "sim"
+        live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? false
+    }
+}
+
+/// Simulated fills, a broker's paper account, or real money.
+public enum VenueMode: String, Sendable, Equatable {
+    case sim = "SIM", paper = "PAPER", live = "LIVE"
 }
 
 public struct Health: Codable, Sendable, Equatable {

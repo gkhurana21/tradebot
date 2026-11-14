@@ -18,7 +18,10 @@ struct DashboardView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     statRow
-                    equityChart
+                    VStack(alignment: .leading, spacing: 6) {
+                        equityChart
+                        activityLine
+                    }
                     positionsTable
                 }
                 .padding(20)
@@ -47,10 +50,26 @@ struct DashboardView: View {
                     .background(Color.red, in: Capsule())
                     .help("Daily drawdown kill switch has tripped — trading is stopped.")
             }
+            modeBadge
             connectionPill
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
+    }
+
+    /// SIM, PAPER or LIVE. Live is the only filled, red badge, so real money
+    /// is never something the operator has to infer.
+    private var modeBadge: some View {
+        let mode = model.stats.mode
+        let tint: Color = mode == .live ? .red : (mode == .paper ? .blue : .secondary)
+        return Text(mode.rawValue)
+            .font(.system(size: 10, weight: .bold))
+            .tracking(0.8)
+            .foregroundStyle(mode == .live ? Color.white : tint)
+            .padding(.horizontal, 9).padding(.vertical, 5)
+            .background(mode == .live ? tint : tint.opacity(0.14), in: Capsule())
+            .help(mode == .live ? "Orders on \(model.stats.venue) risk real money."
+                                : "Orders go to \(model.stats.venue). No real money.")
     }
 
     private var connectionPill: some View {
@@ -83,23 +102,30 @@ struct DashboardView: View {
     // MARK: - Stat tiles
 
     private var statRow: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+        HStack(spacing: 12) {
             StatTile(label: "Equity",
                      value: money(model.stats.equity),
                      tone: .neutral)
             StatTile(label: "Session return",
                      value: percent(model.sessionReturn, signed: true),
                      tone: model.sessionReturn >= 0 ? .good : .bad)
-            StatTile(label: "Observed drawdown",
+            StatTile(label: "Drawdown",
                      value: percent(model.observedDrawdown),
                      tone: model.observedDrawdown > 0 ? .bad : .neutral)
-            StatTile(label: "Fills", value: "\(model.stats.fills)", tone: .neutral)
-            StatTile(label: "Rejected",
-                     value: "\(model.stats.rejected)",
-                     detail: percent(model.stats.rejectionRate) + " of decisions",
+            StatTile(label: "Rejected by risk",
+                     value: percent(model.stats.rejectionRate),
                      tone: .neutral)
-            StatTile(label: "Bracket exits", value: "\(model.stats.exits)", tone: .neutral)
         }
+    }
+
+    /// Secondary counters, kept to one quiet line so the tiles stay readable.
+    private var activityLine: some View {
+        let s = model.stats
+        return Text("\(s.decisions) decisions · \(s.rejected) rejected · \(s.fills) fills · "
+                    + "\(s.exits) bracket exits · \(s.ticks) ticks")
+            .font(.system(size: 11))
+            .monospacedDigit()
+            .foregroundStyle(.tertiary)
     }
 
     // MARK: - Equity curve
@@ -111,16 +137,20 @@ struct DashboardView: View {
                 if model.equityHistory.count < 2 {
                     placeholder("Waiting for samples…")
                 } else {
+                    let domain = model.equityDomain
                     Chart(model.equityHistory) { point in
+                        // The fill starts at the axis floor, not at zero, or the
+                        // area would force the scale back down to zero.
                         AreaMark(x: .value("Time", point.time),
-                                 y: .value("Equity", point.equity))
+                                 yStart: .value("Floor", domain.lowerBound),
+                                 yEnd: .value("Equity", point.equity))
                             .foregroundStyle(chartTint.opacity(0.12))
                         LineMark(x: .value("Time", point.time),
                                  y: .value("Equity", point.equity))
                             .foregroundStyle(chartTint)
                             .lineStyle(StrokeStyle(lineWidth: 2))
                     }
-                    .chartYScale(domain: .automatic(includesZero: false))
+                    .chartYScale(domain: domain)
                     .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) }
                     .frame(height: 200)
                 }

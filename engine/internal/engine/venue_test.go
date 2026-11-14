@@ -298,3 +298,23 @@ func TestSimulatedModeIsUnaffected(t *testing.T) {
 		t.Error("simulated execution stopped working")
 	}
 }
+
+func TestStatsReportWhereOrdersGo(t *testing.T) {
+	sim := New(book.New(book.Options{StartingCash: 10_000}), risk.New(risk.Balanced()))
+	if s := sim.Stats(); s.Venue != "sim" || s.Live {
+		t.Errorf("no venue: got venue=%q live=%v, want sim/false", s.Venue, s.Live)
+	}
+
+	paper := newFakeVenue()
+	e, _ := venueEngine(t, paper)
+	if s := e.Stats(); s.Venue != "fake" || s.Live {
+		t.Errorf("paper venue: got venue=%q live=%v, want fake/false", s.Venue, s.Live)
+	}
+
+	live := newFakeVenue()
+	live.live = true
+	e, _ = venueEngine(t, live)
+	if s := e.Stats(); !s.Live {
+		t.Error("a live venue must be reported as live")
+	}
+}

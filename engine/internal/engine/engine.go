@@ -71,6 +71,10 @@ type Stats struct {
 	Exits     uint64  `json:"exits"`
 	Halted    bool    `json:"halted"`
 	Equity    float64 `json:"equity"`
+	// Venue names where approved orders go ("sim" when simulated) and Live
+	// says whether they risk real money, so a monitor never has to guess.
+	Venue string `json:"venue"`
+	Live  bool   `json:"live"`
 }
 
 // Engine owns the book and risk gate and serializes all mutations.
@@ -200,7 +204,7 @@ func (e *Engine) SubmitDecision(ctx context.Context, d types.Decision) (risk.Res
 
 // Stats returns a consistent counter snapshot.
 func (e *Engine) Stats() Stats {
-	return Stats{
+	s := Stats{
 		Ticks:     e.nTicks.Load(),
 		Decisions: e.nDecisions.Load(),
 		Fills:     e.nFills.Load(),
@@ -208,7 +212,12 @@ func (e *Engine) Stats() Stats {
 		Exits:     e.nExits.Load(),
 		Halted:    e.risk.Halted(),
 		Equity:    e.book.Equity(),
+		Venue:     "sim",
 	}
+	if e.venue != nil {
+		s.Venue, s.Live = e.venue.Name(), e.venue.IsLive()
+	}
+	return s
 }
 
 // run is the single owner goroutine. Every book and risk mutation happens

@@ -88,6 +88,7 @@ class LiveTrader:
             candle = self._safe_fetch(sym)
             if candle is None or not self._is_new(candle):
                 continue
+            self.risk.roll_day(candle.ts, self.broker.account().equity)
             self.broker_mark(candle)
             self._check_exits(candle)
             sig = self._strategies[sym].on_candle(candle)

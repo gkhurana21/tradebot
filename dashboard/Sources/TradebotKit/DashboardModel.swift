@@ -12,7 +12,7 @@ public enum ConnectionState: Equatable, Sendable {
     public var label: String {
         switch self {
         case .connecting: return "Connecting"
-        case .live: return "Live"
+        case .live: return "Connected"
         case .failing: return "Disconnected"
         }
     }
@@ -60,6 +60,17 @@ public final class DashboardModel {
     public var sessionReturn: Double {
         guard let first = equityHistory.first, first.equity > 0 else { return 0 }
         return (stats.equity - first.equity) / first.equity
+    }
+
+    /// Y-axis range for the equity chart: the observed low and high plus some
+    /// headroom. A zero baseline would flatten a $25k account's moves into a
+    /// straight line; a floor on the padding keeps a flat session from
+    /// zooming in until rounding noise looks like volatility.
+    public var equityDomain: ClosedRange<Double> {
+        let values = equityHistory.map(\.equity)
+        guard let low = values.min(), let high = values.max() else { return 0...1 }
+        let pad = max((high - low) * 0.15, abs(high) * 0.001, 1)
+        return (low - pad)...(high + pad)
     }
 
     /// Peak-to-trough decline across the observed window.

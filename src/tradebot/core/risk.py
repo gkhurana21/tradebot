@@ -7,6 +7,7 @@ enforcing hard caps that no amount of model confidence can override.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 
 from .types import Account, Decision, Order, OrderType, Side
 
@@ -50,11 +51,31 @@ class RiskEngine:
     def __init__(self, config: RiskConfig | None = None):
         self.cfg = config or RiskConfig()
         self._day_start_equity: float | None = None
+        self._day: date | None = None
         self._halted = False
 
     def start_day(self, equity: float) -> None:
+        """Begin a new session: reset the drawdown baseline and clear any halt."""
         self._day_start_equity = equity
         self._halted = False
+
+    def roll_day(self, ts: datetime, equity: float) -> bool:
+        """Start a new session when `ts` falls on a later UTC day.
+
+        Call this once per bar, before the bar is marked, with the equity the
+        account had going into it. A halt therefore lasts for the rest of the
+        day it tripped on, whatever equity does in the meantime, and the next
+        day starts fresh from that day's opening equity. Returns True on a roll.
+        """
+        day = (ts.astimezone(timezone.utc) if ts.tzinfo else ts).date()
+        if self._day is None:
+            self._day = day
+            return False
+        if day <= self._day:
+            return False
+        self._day = day
+        self.start_day(equity)
+        return True
 
     @property
     def halted(self) -> bool:

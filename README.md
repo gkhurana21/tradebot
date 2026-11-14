@@ -1,147 +1,201 @@
-# tradebot — a Claude-driven trading system
+<div align="center">
+
+# tradebot
+
+### A trading system where the AI proposes and a 104-nanosecond risk gate decides.
+
+*Python researches. Go executes. SwiftUI watches. Claude never touches an order directly.*
+
+<br/>
+
+[![Try the demo](https://img.shields.io/badge/Try%20the%20demo-one%20command-00C853?style=for-the-badge&logo=gnubash&logoColor=white)](#-try-it-in-one-command)
+[![Portfolio](https://img.shields.io/badge/Portfolio-gaurangkhurana.ca-111111?style=for-the-badge&logo=About.me&logoColor=white)](https://gaurangkhurana.ca)
+
+<br/>
 
 [![CI](https://github.com/gkhurana21/tradebot/actions/workflows/ci.yml/badge.svg)](https://github.com/gkhurana21/tradebot/actions/workflows/ci.yml)
-[![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white)](engine)
-[![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](dashboard)
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](src/tradebot)
-[![License](https://img.shields.io/badge/license-MIT-black)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white)
+![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?style=flat-square&logo=swift&logoColor=white)
+![Claude](https://img.shields.io/badge/Claude-brain%20%2B%20MCP-D97757?style=flat-square&logo=anthropic&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
-A three-language trading system: **Python** researches and decides, **Go**
-executes and enforces risk, **SwiftUI** monitors. Claude is the analysis brain;
-a deterministic risk engine has final say over every order.
+[What it does](#-what-it-does) • [Coin-flip test](#-does-it-beat-a-coin-flip) • [Architecture](#%EF%B8%8F-architecture) • [Try it](#-try-it-in-one-command) • [Under the hood](#-under-the-hood)
 
-> ⚠️ **Not financial advice. Trading risks real money.** This is a software
-> project. Run it in paper mode. Nothing here executes live trades until you
-> wire a live adapter and flip it on yourself — with your own eyes on the risk.
+</div>
 
-## Architecture
+> [!WARNING]
+> **Not financial advice.** This is a software project, built paper-first. It makes no claim to be profitable,
+> and nothing trades real money unless you pass two separate live flags yourself.
+
+> [!NOTE]
+> **Status: finished and frozen.** This was my showcase trading system. My active research has moved on; the
+> code here stays as a complete, tested reference.
+
+---
+
+## The problem
+
+LLMs are good at reading a chart and arguing a case. They are also confidently wrong, and a trading bot that lets
+a model place orders is one hallucination away from a blown account. Most "AI trading" projects either trust the
+model completely or bolt a few `if` checks onto the same process, where one bug can skip them.
+
+## The fix
+
+**Split thinking from doing, and put a process boundary between them.** Claude reads the market and *proposes*.
+A deterministic Go engine sizes, approves or vetoes every proposal, then and only then talks to a broker. A
+research-side bug cannot reach the market without passing the gate, because the gate is not in the same program.
+
+<p align="center">
+  <img src="docs/screenshots/dashboard-demo.gif" width="720"
+       alt="The SwiftUI dashboard updating live: equity rising, three positions opening, and one low-confidence proposal rejected by the risk gate"/>
+</p>
+<p align="center"><sub>The native dashboard watching the Go engine in <b>SIM</b> mode, fed by a
+<a href="docs/tools/demo_driver.py">scripted driver</a> with made-up prices. The fills and the rejection are the engine's own.</sub></p>
+
+<table>
+<tr>
+<td align="center" width="25%"><h3>104 ns</h3><sub>per risk-gate check, 0 allocations, race-tested</sub></td>
+<td align="center" width="25%"><h3>p = 0.15</h3><sub>out-of-sample against 199 coin-flip twins: no proven edge, and it says so</sub></td>
+<td align="center" width="25%"><h3>130</h3><sub>tests across Go, Python and Swift, plus a cross-language CI job</sub></td>
+<td align="center" width="25%"><h3>2 flags</h3><sub>needed for real money, so one typo never trades it</sub></td>
+</tr>
+</table>
+
+## ✨ What it does
+
+<table>
+<tr>
+<td width="50%"><b>🧠 Two research brains.</b> A single Claude call, or a LangGraph pipeline where one model argues
+<i>for</i> the trade, another argues <i>against</i>, and a judge commits. A fatal critique vetoes the trade before
+the judge is ever called. A failed critique counts as maximum doubt, never as "no objection".</td>
+<td width="50%"><b>🛡️ A risk gate that can say no.</b> Position caps, risk-per-trade, stop-loss, confidence floor,
+max open positions and a daily-drawdown kill switch. Rejections are typed values you can count and alert on.
+Recovering equity does not clear a halt; only a new session does (the next UTC day in Python, a restart in the Go engine).</td>
+</tr>
+<tr>
+<td><b>📈 Honest backtesting.</b> The backtest runs the exact code path a live run would. Walk-forward optimization
+scores parameters out-of-sample. A bar that touches both stop and target resolves as the stop, because assuming the
+favorable fill would inflate every result.</td>
+<td><b>🎲 The "$1 → $1M" reality check.</b> A Monte Carlo of thousands of simulated traders. With a real 55% edge,
+careful sizing usually compounds. With the same edge and aggressive sizing, the median trader ends at $0.02.</td>
+</tr>
+<tr>
+<td><b>🔌 Real broker, behind the gate.</b> An Alpaca venue with paper and live modes: env-only credentials,
+reconciliation on startup, idempotency keys on every order, no retries on 4xx, and venue limits enforced before an
+order is sent.</td>
+<td><b>🤖 Claude can drive it.</b> An MCP bridge lets any Claude session run backtests, sweep a parameter and draw
+equity curves, all read-only against the paper broker. A TradingView webhook routes Pine alerts through the same
+brain and gate.</td>
+</tr>
+</table>
+
+## 🎲 Does it beat a coin flip?
+
+A backtest return means little on its own. The real question is whether the strategy beats trading
+**the same moments in random directions**. `tradebot nulltest` answers it:
+
+- **Null model.** The same strategy, brain, risk gate, fees, slippage and candles, with one change: each position
+  chain, from opening flat to flat again, gets a random sign. The null reverses, stacks and exits exactly when
+  the strategy would, so turnover and fees match. Only which way each position faces is left to chance.
+- **One primary metric, fixed in advance:** total return after all costs. **p** is the share of 199
+  coin-flip runs that did at least as well.
+- **Out-of-sample data:** Coinbase hourly bars for BTC, ETH and SOL from 2026-08-15 to 2026-10-31. The strategy code
+  last changed on 2026-08-14. The bars are committed in [`docs/data`](docs/data), so anyone gets the same answer.
+
+| | Total return | Round trips |
+|---|---|---|
+| Strategy | **−24.99%** | 624 |
+| Coin flips, median of 199 | −29.65% | 633 |
+| Coin flips, 5th–95th percentile | −36.20% to −21.37% | |
+| **p-value** (one-sided) | **0.150** | |
+
+**Verdict: no evidence of skill.** It lost less than the typical coin flip, but 15% of coin flips did as
+well. The tests sanity-check the method rather than measure its power: it flags a planted look-ahead
+edge, and on runs with no edge it doesn't report significance more often than it should.
+
+```bash
+tradebot nulltest --source snapshot --seeds 199      # ~2 minutes, all cores, no API calls
+```
+
+<p align="center">
+  <img src="docs/screenshots/backtest-report.png" width="720"
+       alt="HTML backtest report: four tiles, an equity curve bleeding to minus 40 percent with drawdown shading and kill-switch markers"/>
+</p>
+<p align="center"><sub>The HTML report on synthetic data: −40% over 979 trades after fees, with drawdown shaded and the
+two days the kill switch fired marked in red. The kill switch caps a bad day; it cannot create an edge.</sub></p>
+
+## 🏗️ Architecture
 
 ```
-  Python — research                Go — execution              Swift — monitoring
-  ─────────────────                ──────────────              ──────────────────
-  market data ─┐                   ┌──────────────────┐        ┌────────────────┐
-  indicators   ├─→ Claude brain ──→│ risk gate  104ns │──fills→│ equity curve   │
-  patterns     │    (proposes)  HTTP│ position book    │  HTTP  │ positions      │
-  backtests   ─┘                   │ bracket monitor  │───────→│ halt state     │
-                                   └──────────────────┘        └────────────────┘
+  Python: research                 Go: execution                Swift: monitoring
+  ────────────────                 ─────────────                ─────────────────
+  market data ─┐                   ┌──────────────────┐         ┌────────────────┐
+  indicators   ├─→ Claude brain ──→│ risk gate  104ns │──fills─→│ equity curve   │
+  patterns     │    (proposes) HTTP│ position book    │  HTTP   │ positions      │
+  backtests   ─┘                   │ bracket monitor  │────────→│ halt state     │
+                                   │ venue sim/alpaca │         └────────────────┘
+                                   └──────────────────┘
                                     decides; can say no
 ```
 
-**Why the split.** Research is IO-bound and exploratory — it calls an LLM,
-replays history, tolerates seconds of latency. Execution is the opposite:
-fast, deterministic, and impossible to bypass by accident. Putting the risk
-gate behind a process boundary means a research-side bug *cannot* reach the
-market without passing it.
-
 | Component | Language | What it does |
 |---|---|---|
-| [research + backtesting](src/tradebot) | Python | strategies, Claude brain, backtester, walk-forward optimizer, Monte Carlo |
-| [execution engine](engine) | Go | risk gate, position book, HTTP service — 104 ns/op, 0 allocs, race-tested |
-| [dashboard](dashboard) | SwiftUI | live native monitor — equity curve, positions, halt state |
+| [research + backtesting](src/tradebot) | Python | strategies, Claude brains, backtester, walk-forward optimizer, Monte Carlo, live paper loop |
+| [execution engine](engine) | Go | risk gate, position book, venue seam (sim, Alpaca paper, Alpaca live), HTTP service. Standard library only |
+| [dashboard](dashboard) | SwiftUI | native live monitor: equity, positions, halt state, and a SIM / PAPER / LIVE badge so real money is never implied |
+| [MCP bridge](mcp) | Python | lets Claude run backtests, sweeps and charts. Read-only |
+| [legacy-bot](legacy-bot) | Python | the July 2026 predecessor, kept for its statistical decision gate (below) |
 
-Every component is swappable behind an interface, and a backtest runs the
-**exact same code path** a live run would.
+**Why the split.** Research is IO-bound and exploratory: it calls an LLM, replays history and tolerates seconds of
+latency. Execution is the opposite: fast, deterministic and impossible to bypass by accident. In the engine, one
+goroutine owns all state, so there are no locks because there is no shared access.
 
-```bash
-cd engine    && go test -race ./... && go run ./cmd/engine   # execution service
-cd dashboard && ./test.sh && ./run.sh                        # native monitor
-PYTHONPATH=src python3 tests/test_core.py                    # research layer
-```
-
-## Quickstart
-
-A virtual environment is already set up in `.venv` with everything installed
-(including `anthropic` for the Claude brain). Activate it and use the `tradebot`
-command — no `PYTHONPATH` needed:
+## ⚡ Try it in one command
 
 ```bash
-source .venv/bin/activate
-
-tradebot analyze --symbol BTC-USD          # read the live BTC chart
-tradebot compare --symbol BTC-USD          # free heuristic vs Claude, side by side
-tradebot montecarlo                        # the $1 -> $1M reality check
-tradebot backtest --no-llm --verbose       # watch a backtest decision-by-decision
-tradebot --help                            # all commands
-```
-
-Rebuild the environment from scratch if needed:
-
-```bash
+git clone https://github.com/gkhurana21/tradebot.git && cd tradebot
 python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[llm]"
+./demo.sh
 ```
 
-Zero-dependency mode also works without any install:
+The demo runs the whole system end to end: chart analysis on real BTC data, backtests at three risk levels, a
+multi-symbol portfolio, walk-forward optimization, the Monte Carlo, a live paper loop and an HTML report. It is free
+unless you give it an Anthropic API key, and then only one step calls Claude, capped at 50 Haiku calls (about 3 cents).
+
+Run each component's tests:
 
 ```bash
-PYTHONPATH=src python3 -m tradebot backtest --no-llm
-python3 tests/test_core.py                  # 20 tests on the money logic
+cd engine    && go test -race ./...                 # Go: risk gate, book, engine, venue
+cd dashboard && ./test.sh                           # Swift: decoding, polling, derived metrics
+PYTHONPATH=src python3 tests/test_core.py           # Python: strategies, risk, brokers, simulators
 ```
 
-Enable the **real Claude brain**:
+## 🔧 Under the hood
+
+<details>
+<summary><b>CLI, brains, risk, the Go engine, the MCP bridge, legacy-bot and testing in detail</b></summary>
+
+### The CLI
+
+Everything is one `tradebot` command (or `PYTHONPATH=src python3 -m tradebot` with no install; the core needs only
+the standard library):
 
 ```bash
-pip install anthropic
-export ANTHROPIC_API_KEY=sk-ant-...
-python3 scripts/run_backtest.py                 # brain mode -> "LLM (Claude)"
-```
-
-### Cost controls (the brain costs real API money)
-
-Each signal = one Claude API call. To test cheaply and never get a surprise bill:
-
-```bash
-# haiku is ~5x cheaper than opus — good for a first paid test
-python3 -m tradebot backtest --model haiku --max-llm-calls 50 --bars 300
-```
-
-- `--model opus|sonnet|haiku` — opus is the default and most capable; haiku is ~$0.0015/call vs opus ~$0.007/call.
-- `--max-llm-calls N` — hard cap: after N API calls the run finishes on the free heuristic. Bounds spend per run.
-- Every LLM run prints an actual-spend line: `LLM calls: 34  tokens in/out: … est. spend: $0.24`.
-
-Rough budgeting: **$5 of credit ≈ ~18 opus backtests or ~90 haiku backtests.**
-
-## Layout
-
-| Path | Role |
-|------|------|
-| `core/types.py` | Shared dataclasses (Candle, Signal, Decision, Order, Position, Account) |
-| `core/strategy.py` | EMA/RSI trend, Bollinger mean-reversion, + agreement **Ensemble** |
-| `core/risk.py` | Risk engine: sizing, hard caps, exposure-aware, kill switch |
-| `core/metrics.py` | Sharpe, Sortino, Calmar, profit factor, expectancy, trade ledger |
-| `brokers/base.py` | `BrokerAdapter` interface |
-| `brokers/paper.py` | Paper broker with fees, slippage, round-trip trade tracking |
-| `brain/brain.py` | Claude brain — on-chain context aware, optional live **web-search** |
-| `data/feed.py` | Synthetic / Coinbase / CSV candle feeds |
-| `data/onchain.py` | On-chain signals via public RPC (gas, stablecoin supply) |
-| `backtest/engine.py` | Single-symbol event-driven backtester |
-| `backtest/portfolio.py` | Multi-symbol portfolio backtester (shared account/risk) |
-| `backtest/optimize.py` | Walk-forward parameter search (out-of-sample scored) |
-| `backtest/dashboard.py` | Self-contained HTML dashboard (equity curve, tiles, trades) |
-| `live/engine.py` | Live trading loop — same code path as backtest, JSON events |
-| `live/webhook.py` | TradingView webhook receiver (stdlib, shared-secret auth) |
-| `sim/montecarlo.py` | Risk-of-ruin simulator (compounding vs. bust odds) |
-| `sim/breakeven.py` | Win rate required to overcome fees at each trade size |
-| `brain/graph.py` | LangGraph research pipeline (thesis / critique / judge) |
-| `cli.py` | Unified `python -m tradebot` entry point |
-
-The Go engine and Swift dashboard have their own READMEs:
-[engine/README.md](engine/README.md) · [dashboard/README.md](dashboard/README.md)
-
-## Unified CLI
-
-Everything is one command (`PYTHONPATH=src python3 -m tradebot <cmd>`):
-
-```bash
-python3 -m tradebot analyze --source coinbase --symbol BTC-USD   # read the chart: trend, S/R, patterns
-python3 -m tradebot backtest --symbol BTC-USD --profile balanced --verbose
-python3 -m tradebot portfolio --onchain            # 3-symbol ensemble + on-chain context
-python3 -m tradebot optimize --bars 2000 --folds 4 # walk-forward parameter search
-python3 -m tradebot live --iterations 400 --poll 0 # live paper loop (streams JSON events)
-python3 -m tradebot webhook --secret YOURSECRET    # TradingView alert receiver -> live trader
-python3 -m tradebot dashboard --out dashboard.html # HTML report
-python3 -m tradebot breakeven                      # win rate needed to beat fees
-python3 -m tradebot montecarlo                     # risk-of-ruin simulator
-python3 -m tradebot onchain                        # live on-chain snapshot
+tradebot analyze --source coinbase --symbol BTC-USD   # read the chart: trend, S/R, patterns
+tradebot backtest --symbol BTC-USD --profile balanced --verbose
+tradebot compare --symbol BTC-USD                     # free heuristic vs Claude, side by side
+tradebot portfolio --onchain                          # 3-symbol ensemble + on-chain context
+tradebot optimize --bars 2000 --folds 4               # walk-forward parameter search
+tradebot live --iterations 400 --poll 0               # live paper loop (streams JSON events)
+tradebot webhook --secret YOURSECRET                  # TradingView alert receiver
+tradebot dashboard --out dashboard.html               # HTML report
+tradebot breakeven                                    # win rate needed to beat fees
+tradebot montecarlo                                   # risk-of-ruin simulator
+tradebot nulltest --source snapshot                   # does it beat a coin flip?
+tradebot snapshot --start 2026-08-15 --end 2026-11-01 # save a fixed Coinbase window
+tradebot onchain                                      # live on-chain snapshot
 ```
 
 ### Two research brains
@@ -151,11 +205,8 @@ tradebot backtest --brain single    # one Claude call (default)
 tradebot backtest --brain graph     # LangGraph: thesis -> critique -> judge
 ```
 
-The default brain makes one call: everything in, a decision out. A single pass
-has no way to catch its own motivated reasoning -- a model handed a bullish
-signal tends to find bullish reasons.
-
-`--brain graph` splits research into stages and makes one of them adversarial:
+A single pass has no way to catch its own motivated reasoning: a model handed a bullish signal tends to find bullish
+reasons. `--brain graph` makes one stage adversarial:
 
 ```mermaid
 graph LR
@@ -172,138 +223,117 @@ graph LR
 | `judge` | weighs both and commits | 1 call |
 | `veto` | terminal, when the critique is fatal | free |
 
-The conditional edge is what makes this a graph rather than a chain: a damning
-critique routes straight to a veto and skips the judge entirely. Rejections are
-the common case, so it usually costs **2 calls, not 3**.
+Rejections are the common case, so it usually costs **2 calls, not 3**. The final rationale carries both sides, so
+a losing trade is reviewable later. Both brains return the same `Decision`, so nothing downstream changes. Install
+with `pip install -e ".[graph]"`. It costs 2–3x a single call and there is no evidence yet that it trades better;
+that is what `compare` is for.
 
-Both brains return the same `Decision`, so the backtester, live loop, risk
-engine, and Go service are unchanged either way.
+The brain can also be **news-aware** (`Brain(news_aware=True)`): Claude web-searches headlines before deciding.
 
-Two design choices worth noting: a **failed critique fails closed** (losing the
-adversary is treated as maximum doubt, never as "no objection"), and the final
-rationale **carries both sides** of the argument — a losing trade is only
-reviewable later if you recorded what the system argued against.
+### Cost controls
 
-Optional install: `pip install -e ".[graph]"`. It costs 2–3x a single call and
-there is no evidence yet that it trades better — that is what `compare` is for.
+Each signal is one Claude API call, so spend is capped:
 
-### Chart pattern & trend analysis
+- `--model opus|sonnet|haiku`: Haiku is about $0.0015 a call against Opus at about $0.007.
+- `--max-llm-calls N`: after N calls the run finishes on the free heuristic.
+- Every LLM run prints its actual spend: `LLM calls: 34  tokens in/out: … est. spend: $0.24`.
 
-`core/patterns.py` reads a candle window like a trader would: trend direction +
-strength (regression + ADX), support/resistance from clustered swing pivots,
-candlestick patterns (engulfing, hammer, shooting star, doji), and chart patterns
-(range breakout, double top/bottom). The `PatternStrategy` trades pattern+trend
-confluence, and the full read is attached to every signal for the brain to weigh.
+### Risk profiles, read honestly
 
-### The "$1 → $1M" question, answered with a simulator
+`--profile conservative|balanced|aggressive` uses the same signals at three risk levels. On identical data,
+aggressive turned a **-2.8%** result into **-10.5%** with a 13.8% drawdown. **Aggressive raises the risk of ruin; it
+does not raise expected return.** A -90% loss needs +900% to recover.
 
-`python3 -m tradebot montecarlo` runs thousands of simulated traders so you can
-see the real odds instead of guessing. What it shows:
+### The "$1 → $1M" question
 
-| Assumed edge | Careful 5% sizing | Result |
+| Assumed edge | Sizing | Result |
 |---|---|---|
-| 50% (no edge) | yes | ~0% reach $1M, bleed toward $0 |
-| 51% (thin edge) | yes | ~0% reach $1M |
-| 55% @1:1 net of fees | yes | ~87–92% reach $1M — but ~3,700 trades (years) |
-| 55% edge | **aggressive 50%/trade** | median ends at **$0.02** — overbetting ruins you *with* an edge |
+| 50% (no edge) | careful 5% | ~0% reach $1M, bleed toward $0 |
+| 51% (thin edge) | careful 5% | ~0% reach $1M |
+| 55% @1:1 net of fees | careful 5% | ~87–92% reach $1M, but over ~3,700 trades (years) |
+| 55% edge | **aggressive 50%** | median ends at **$0.02**: overbetting ruins you *with* an edge |
 
-**The compounding isn't the impossible part — a durable edge is.** If you can
-prove a real ~55%/1:1 edge *net of costs, out-of-sample, over thousands of
-trades*, careful fixed-fractional compounding can work. Almost no retail strategy
-has that edge net of fees and slippage. The whole game is honestly hunting for
-(and validating) even a small real edge — which is what the backtester, the
-walk-forward optimizer, and the analysis engine are for.
+**Compounding isn't the hard part; a durable edge is.** The backtester, walk-forward optimizer and analysis engine
+exist to hunt for one honestly.
 
-### Risk profiles — read this honestly
+### The Go engine
 
-`--profile conservative|balanced|aggressive`. Same signals, three risk levels.
-On identical data, aggressive turned a **-2.8%** result into **-10.5%** with a
-13.8% drawdown. **Aggressive raises the risk of ruin; it does not raise expected
-return.** On a small account, a normal losing streak at high risk-per-trade can
-take you toward zero — and -90% needs +900% just to get back. There is no setting
-that produces "insane returns from minimum capital." Anything claiming to is a way
-to lose money. Size risk to what you can afford to lose entirely.
+| Benchmark | Latency | Allocations |
+|---|---|---|
+| Risk gate (`Evaluate`) | **104 ns/op** | **0 B, 0 allocs** |
+| Risk gate, parallel | 122 ns/op | 0 B, 0 allocs |
+| Full pipeline (incl. channel hop) | 1.66 µs/op | 864 B, 4 allocs |
 
-### TradingView integration
-
-Point a Pine Script alert's webhook at `http://<host>:8787/webhook` with a JSON message:
-
-```json
-{"secret": "YOURSECRET", "symbol": "BTC-USD", "side": "buy",
- "strength": 0.8, "reason": "supertrend flip", "price": {{close}}}
+```bash
+go run ./cmd/engine -venue sim            # default: simulated fills, no account
+go run ./cmd/engine -venue alpaca-paper   # real order lifecycle, no money
+go run ./cmd/engine -venue alpaca-live -i-understand-this-trades-real-money
 ```
 
-The receiver authenticates the secret, converts it to a `Signal`, and routes it
-through the **same brain + risk engine** as everything else — a TradingView alert
-still can't move money on its own.
+Market data is dropped when the buffer is full (a stale price is worse than a missing one), and a failed close never
+updates the book, so risk never believes a position is flat while the broker still holds it. The Alpaca wire format
+is tested against a stubbed transport but has not been smoke-tested against a live account. Full design notes are in
+[engine/README.md](engine/README.md).
 
-Enable **news-aware** decisions (Claude web-searches headlines before deciding):
+### The MCP bridge
 
-```python
-from tradebot.brain.brain import Brain
-brain = Brain(news_aware=True)   # needs ANTHROPIC_API_KEY + `pip install anthropic`
-```
+`backtest_run`, `backtest_sweep`, `backtest_chart` and `market_quote`, over stdio with no SDK. Deterministic by
+default (heuristic brain, fixed seed) so a sweep compares parameters, not LLM noise. `market_quote` reads from
+[QuantCore](https://github.com/gkhurana21/quantcore)'s Go proxy. See [mcp/README.md](mcp/README.md).
 
-## Safety design
+### Chart patterns and integrations
 
-- The brain **only proposes**. It cannot place an order.
-- The risk engine converts proposals to bounded orders and can reject/veto.
-- Hard limits: max position %, risk-per-trade, stop-loss, max open positions,
-  min confidence, and a daily-drawdown **kill switch** that halts trading.
-- The gate runs in a **separate process** (Go). A research-side bug cannot
-  reach the market without passing it.
+`core/patterns.py` reads a candle window the way a trader would: trend and strength (regression + ADX),
+support/resistance from clustered swing pivots, candlestick patterns and range breakouts or double tops/bottoms.
+On-chain signals (gas, stablecoin supply) come from public RPC. A TradingView alert pointed at
+`http://<host>:8787/webhook` is authenticated by shared secret and routed through the same brain and risk engine,
+so an alert still can't move money on its own.
 
-## Testing
+### legacy-bot
 
-| Suite | Command | Coverage |
+The first version, from July 2026: time-series and cross-sectional momentum, mean reversion and a **null-random
+control** that trades random directions through the same costs and execution path. Its decision gate compares each
+strategy against that control (a two-proportion z-test, falling back to Fisher's exact test on small samples) and
+only calls a strategy a candidate when it beats random at significance. It has its own no-lookahead tests. Live
+trading was never built there.
+
+### Testing
+
+| Suite | Command | Count |
 |---|---|---|
-| Go | `cd engine && go test -race ./...` | risk gate, book P&L, engine pipeline, concurrency |
-| Swift | `cd dashboard && ./test.sh` | decoding, error mapping, polling, derived metrics |
-| Python | `PYTHONPATH=src python3 tests/test_core.py` | strategies, risk, brokers, patterns, simulators |
+| Go | `cd engine && go test -race ./...` | 46 tests + 3 benchmarks |
+| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py` | 25 + 13 + 7 tests |
+| Swift | `cd dashboard && ./test.sh` | 39 checks |
 
-CI runs all three on every push, plus an **integration job** that starts the Go
-engine, drives a trade through the risk gate, and probes it with the Swift
-client — the cross-language seam unit tests cannot cover.
+CI runs all three on every push, plus an **integration job** that starts the Go engine, drives a trade through the
+risk gate and probes it with the Swift client: the cross-language seam unit tests cannot cover.
 
-Two behaviors worth calling out, both tested:
+### Layout
 
-- **A bar straddling stop and target resolves as the stop.** Intrabar ordering
-  is unknowable from OHLC, so the engine assumes the adverse fill. Choosing the
-  favorable one would inflate every backtest containing a volatile bar.
-- **Recovering equity does not clear a halt.** Only an explicit new session
-  does. A kill switch that silently resets is not a kill switch.
+| Path | Role |
+|------|------|
+| `src/tradebot/core/` | types, strategies (EMA/RSI, Bollinger, ensemble), risk engine, metrics, patterns |
+| `src/tradebot/brain/` | single-call brain and LangGraph research graph |
+| `src/tradebot/brokers/` | broker interface and paper broker (fees, slippage) |
+| `src/tradebot/backtest/` | single-symbol and portfolio backtesters, walk-forward optimizer, HTML report |
+| `src/tradebot/live/` | live paper loop and TradingView webhook |
+| `src/tradebot/sim/` | Monte Carlo, break-even and coin-flip (null-random) tests |
+| `src/tradebot/data/` | synthetic, Coinbase and CSV feeds; on-chain signals |
+| `engine/` | Go execution engine |
+| `dashboard/` | SwiftUI monitor |
+| `mcp/` | MCP bridge |
+| `legacy-bot/` | July 2026 predecessor |
+| `docs/data/` | the committed Coinbase snapshot behind the coin-flip result |
+| `docs/tools/` | the scripted driver behind the dashboard GIF |
+
+</details>
 
 ## What this does not do
 
-No live exchange connectivity. The broker layer is a simulator: it models fees
-and adverse slippage but fills instantly at the mark, with no order book, queue
-position, partial fills, or rejects. Wiring a real venue means implementing an
-adapter behind the existing interface.
-
-It also makes no claim to be profitable. The tooling here is built to *look*
-for an edge honestly — walk-forward validation that rejects overfit parameters,
-a cost model that shows what fees do to trade frequency, and a Monte Carlo that
-prices the risk of ruin. Whether an edge exists on public data for a retail
-trader is an open question this repo does not pretend to have answered.
-
-## Roadmap
-
-- [x] Adapter architecture + paper broker + risk engine
-- [x] EMA/RSI strategy + Claude brain (with offline fallback)
-- [x] Event-driven backtester, pro metrics, trade ledger
-- [x] Bollinger + pattern strategies, agreement ensemble
-- [x] Multi-symbol portfolio backtester
-- [x] On-chain signals (gas, stablecoin supply) via public RPC
-- [x] News-aware brain (Claude web-search) + on-chain context
-- [x] TradingView webhook receiver (Pine alerts → signals)
-- [x] Live paper loop, walk-forward optimization, unified CLI
-- [x] **Go execution engine** — 104 ns/op risk gate, race-tested
-- [x] **SwiftUI dashboard** — native live monitor
-- [x] **CI** across all three languages + cross-language integration
-- [ ] MetaTrader 5 adapter (Windows VPS) for forex
-- [ ] SQLite persistence + regime detection
-- [ ] Prove Claude brain edge vs heuristic on real data
+It does not claim to be profitable. The simulated venue fills instantly at the mark, with no order book, queue
+position or partial fills; that is what Alpaca paper mode exists to replace. Whether a retail trader can find a
+durable edge on public data is an open question this repo is built to test, not one it pretends to have answered.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

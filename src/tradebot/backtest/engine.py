@@ -27,8 +27,9 @@ class BacktestResult:
     trades: list = field(default_factory=list)   # metrics.Trade round trips
     metrics: m.Metrics = field(default_factory=m.Metrics)
     n_signals: int = 0
-    n_trades: int = 0
+    n_orders: int = 0      # entries/flips submitted; closed round trips are metrics.n_trades
     n_rejected: int = 0
+    halts: list = field(default_factory=list)   # when the kill switch fired
     n_stops: int = 0
     n_targets: int = 0
 
@@ -47,7 +48,7 @@ class BacktestResult:
             f"Sharpe: {self.metrics.sharpe:.2f}  "
             f"Win%: {self.metrics.win_rate_pct:.0f}  "
             f"PF: {self.metrics.profit_factor:.2f}  "
-            f"Trades: {self.n_trades}  Rejected: {self.n_rejected}  "
+            f"Trades: {self.metrics.n_trades}  Orders: {self.n_orders}  Rejected: {self.n_rejected}  "
             f"Stops: {self.n_stops}  Targets: {self.n_targets}  "
             f"Signals: {self.n_signals}  "
             f"Equity: {self.starting_equity:,.0f} -> {self.ending_equity:,.0f}"
@@ -77,6 +78,7 @@ class Backtester:
         self.risk.start_day(self.broker.account().equity)
 
         for candle in candles:
+            self.risk.roll_day(candle.ts, self.broker.account().equity)
             self.broker.mark(candle.symbol, candle.close, candle.ts)
             self._check_exits(candle, res)
 
@@ -85,7 +87,9 @@ class Backtester:
                 res.n_signals += 1
                 self._act_on_signal(signal, candle, res)
 
-            self.risk.check_kill_switch(self.broker.account())
+            was_halted = self.risk.halted
+            if self.risk.check_kill_switch(self.broker.account()) and not was_halted:
+                res.halts.append(candle.ts)
             res.equity_curve.append(self.broker.account().equity)
             res.timestamps.append(candle.ts)
 
@@ -113,7 +117,7 @@ class Backtester:
         if not pos.is_flat and ((pos.qty > 0) != (order.side == Side.BUY)):
             self.broker.close(order.symbol, reason="flip")
         fill = self.broker.submit(order)
-        res.n_trades += 1
+        res.n_orders += 1
         if self.verbose:
             print(f"{candle.ts:%Y-%m-%d %H:%M} {fill.side.value} "
                   f"{fill.qty:.4f} {fill.symbol} @ {fill.price:,.2f} "
