@@ -75,7 +75,9 @@ public struct EngineClient: Sendable {
     public init(baseURL: URL, transport: HTTPTransport = URLSessionTransport()) {
         self.baseURL = baseURL
         self.transport = transport
-        self.decoder = JSONDecoder()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = ISO8601.strategy
+        self.decoder = decoder
     }
 
     public func health() async throws -> Health {
@@ -90,6 +92,13 @@ public struct EngineClient: Sendable {
         try await fetch("positions")
     }
 
+    /// The decision journal from `since` (inclusive) onward. Throws
+    /// `badStatus(404)` on an engine that predates the endpoint; callers treat
+    /// that as "feed unavailable", not as an outage.
+    public func decisions(since: UInt64? = nil) async throws -> DecisionPage {
+        try await fetch("decisions", query: since.map { [URLQueryItem(name: "since", value: String($0))] } ?? [])
+    }
+
     /// Fetches stats and portfolio together so the UI never renders equity
     /// from one instant beside positions from another.
     public func snapshot() async throws -> (EngineStats, PortfolioSnapshot) {
@@ -98,8 +107,13 @@ public struct EngineClient: Sendable {
         return try await (stats, portfolio)
     }
 
-    private func fetch<T: Decodable>(_ path: String) async throws -> T {
-        let (data, code) = try await transport.get(baseURL.appendingPathComponent(path))
+    private func fetch<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+        var url = baseURL.appendingPathComponent(path)
+        if !query.isEmpty, var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            parts.queryItems = query
+            url = parts.url ?? url
+        }
+        let (data, code) = try await transport.get(url)
         guard (200..<300).contains(code) else { throw EngineError.badStatus(code) }
         do {
             return try decoder.decode(T.self, from: data)

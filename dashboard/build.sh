@@ -9,12 +9,26 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILD=.build
+# In Swift 5 mode some availability misuses (a macOS 15 View conformance, say)
+# are only warnings, so the build would pass and crash on macOS 14. Every swiftc
+# call goes through here, which fails the build on any such warning.
+LOG="$(mktemp)"
+trap 'rm -f "$LOG"' EXIT
+compile() {
+  swiftc "$@" 2>&1 | tee "$LOG"
+  local status=${PIPESTATUS[0]}
+  if grep -q "only available in macOS" "$LOG"; then
+    echo "error: availability warning above -- code needs a newer macOS than 14.0" >&2
+    exit 1
+  fi
+  return "$status"
+}
 # Detect the host arch so this works on both Apple Silicon and Intel runners.
 TARGET="$(uname -m)-apple-macosx14.0"
 mkdir -p "$BUILD"
 
 echo "==> Building TradebotKit (library)"
-swiftc -target "$TARGET" -O \
+compile -target "$TARGET" -O \
   -module-name TradebotKit \
   -emit-module -emit-module-path "$BUILD/TradebotKit.swiftmodule" \
   -emit-library -o "$BUILD/libTradebotKit.dylib" \
@@ -22,14 +36,14 @@ swiftc -target "$TARGET" -O \
   Sources/TradebotKit/*.swift
 
 echo "==> Building TradebotDashboard (app)"
-swiftc -target "$TARGET" -O \
+compile -target "$TARGET" -O \
   -I "$BUILD" -L "$BUILD" -lTradebotKit \
   -Xlinker -rpath -Xlinker "@executable_path" \
   -o "$BUILD/TradebotDashboard" \
   Sources/TradebotDashboard/*.swift
 
 echo "==> Building test runner"
-swiftc -target "$TARGET" \
+compile -target "$TARGET" \
   -module-name TradebotKitTests \
   -I "$BUILD" -L "$BUILD" -lTradebotKit \
   -Xlinker -rpath -Xlinker "@executable_path" \
