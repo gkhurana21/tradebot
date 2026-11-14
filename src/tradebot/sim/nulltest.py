@@ -125,15 +125,20 @@ def empirical_p(real: float, nulls: list[float]) -> float:
     return (1 + sum(1 for x in nulls if x >= real)) / (len(nulls) + 1)
 
 
-def _run(streams, strategy_factory, brain, risk_cfg: RiskConfig, cash: float) -> PortfolioResult:
+def _run(streams, strategy_factory, brain, risk_cfg: RiskConfig, cash: float,
+         zero_costs: bool = False) -> PortfolioResult:
+    """One backtest. `zero_costs` sets fees and slippage to zero, which separates
+    better trade choices from simply trading less (and paying less)."""
     cfg = RiskConfig(**vars(risk_cfg))     # fresh copy; the engine is stateful
-    return PortfolioBacktester(strategy_factory, brain, RiskEngine(cfg),
-                               PaperBroker(cash)).run(streams)
+    broker = (PaperBroker(cash, fee_pct=0.0, slippage_pct=0.0) if zero_costs
+              else PaperBroker(cash))
+    return PortfolioBacktester(strategy_factory, brain, RiskEngine(cfg), broker).run(streams)
 
 
 def _run_null(job) -> "_NullRun":
-    streams, strategy_factory, brain_factory, risk_cfg, cash, seed = job
-    r = _run(streams, strategy_factory, NullDirectionBrain(brain_factory(), seed), risk_cfg, cash)
+    streams, strategy_factory, brain_factory, risk_cfg, cash, seed, zero_costs = job
+    r = _run(streams, strategy_factory, NullDirectionBrain(brain_factory(), seed), risk_cfg, cash,
+             zero_costs)
     return _NullRun(r.total_return_pct, r.metrics.n_trades)
 
 
@@ -152,6 +157,7 @@ def run_nulltest(
     seeds: int = 199,
     first_seed: int = 1,
     workers: int | None = None,
+    zero_costs: bool = False,
 ) -> NullTestResult:
     """Run the strategy once and its coin-flip twin `seeds` times.
 
@@ -160,8 +166,8 @@ def run_nulltest(
     """
     brain_factory = brain_factory or heuristic_brain
     risk_cfg = risk_cfg or RiskConfig(max_open_positions=max(3, len(streams)))
-    real = _run(streams, strategy_factory, brain_factory(), risk_cfg, cash)
-    jobs = [(streams, strategy_factory, brain_factory, risk_cfg, cash, first_seed + k)
+    real = _run(streams, strategy_factory, brain_factory(), risk_cfg, cash, zero_costs)
+    jobs = [(streams, strategy_factory, brain_factory, risk_cfg, cash, first_seed + k, zero_costs)
             for k in range(seeds)]
     if workers is None:
         workers = min(len(jobs), os.cpu_count() or 1)
@@ -186,8 +192,8 @@ def run_nulltest(
 
 
 def _run_twin(job) -> "_NullRun":
-    streams, strategy_factory, twin_factory, risk_cfg, cash, seed = job
-    r = _run(streams, strategy_factory, twin_factory(seed), risk_cfg, cash)
+    streams, strategy_factory, twin_factory, risk_cfg, cash, seed, zero_costs = job
+    r = _run(streams, strategy_factory, twin_factory(seed), risk_cfg, cash, zero_costs)
     return _NullRun(r.total_return_pct, r.metrics.n_trades)
 
 
@@ -201,6 +207,7 @@ def run_twins(
     seeds: int = 199,
     first_seed: int = 1,
     workers: int | None = None,
+    zero_costs: bool = False,
 ) -> NullTestResult:
     """Like run_nulltest, but the twins are whatever `twin_factory(seed)` builds.
 
@@ -211,8 +218,8 @@ def run_twins(
     module-level callables so runs can go to worker processes.
     """
     risk_cfg = risk_cfg or RiskConfig(max_open_positions=max(3, len(streams)))
-    real = _run(streams, strategy_factory, real_brain_factory(), risk_cfg, cash)
-    jobs = [(streams, strategy_factory, twin_factory, risk_cfg, cash, first_seed + k)
+    real = _run(streams, strategy_factory, real_brain_factory(), risk_cfg, cash, zero_costs)
+    jobs = [(streams, strategy_factory, twin_factory, risk_cfg, cash, first_seed + k, zero_costs)
             for k in range(seeds)]
     if workers is None:
         workers = min(len(jobs), os.cpu_count() or 1)

@@ -105,6 +105,14 @@ def test_p_values_are_calibrated_without_an_edge():
     assert hits <= 9, hits
 
 
+def test_zero_costs_removes_fees_from_every_run():
+    with_costs = run_nulltest(_streams(n=300), EmaRsiStrategy, seeds=3, workers=1)
+    free = run_nulltest(_streams(n=300), EmaRsiStrategy, seeds=3, workers=1, zero_costs=True)
+    assert free.real_trades == with_costs.real_trades           # same trades...
+    assert free.real_return_pct > with_costs.real_return_pct     # ...without paying for them
+    assert all(f > c for f, c in zip(free.null_returns_pct, with_costs.null_returns_pct))
+
+
 def test_results_do_not_depend_on_worker_count():
     from tradebot.cli import _ensemble
     one = run_nulltest(_streams(n=300), _ensemble, seeds=4, workers=1)
