@@ -99,6 +99,10 @@ jobs:
       - name: Test the Go bridge client
         run: python tests/test_bridge.py
 
+      # Fake batch client and fake anthropic module: no key, no network, no spend.
+      - name: Test the Claude coin-flip harness
+        run: python tests/test_claudetest.py
+
       # The graph tests fake every model call, so they need no key and no spend.
       - name: Test the research graph
         run: |

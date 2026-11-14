@@ -179,6 +179,16 @@ def test_webhook_alert_after_midnight_rolls_the_day_first():
     assert not risk.halted                               # the new day started first
 
 
+def test_roll_day_treats_naive_timestamps_as_utc():
+    from datetime import datetime, timedelta
+    r = RiskEngine()
+    r.start_day(10_000)
+    naive = datetime(2024, 1, 1, 23, 0)                 # no tzinfo: read as UTC
+    assert r.roll_day(naive, 10_000) is False
+    assert r.roll_day(naive + timedelta(minutes=30), 10_000) is False   # same UTC day
+    assert r.roll_day(TS + timedelta(days=1), 10_000) is True           # aware, next day
+
+
 def test_csv_without_timezone_is_rejected():
     import tempfile, os
     with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:

@@ -1,9 +1,9 @@
 # Pre-registration: does the Claude brain beat a coin flip?
 
-Status: TEMPLATE. Fill the placeholders with
-`tradebot nulltest --brain claude --build-prompts --fill-prereg docs/claude-test-preregistration.md`
-(it builds the prompts offline, then replaces every `{{...}}` token below), then commit and push this file
-**before any paid call**. Everything after that point is run exactly as written here.
+Status: **FROZEN 2026-11-14.** Filled by
+`tradebot nulltest --brain claude --build-prompts --fill-prereg docs/claude-test-preregistration.md`.
+This file is pushed **before any paid call**; everything after that point is run exactly as written here.
+The prompts file is rebuilt deterministically by the same command and checked against the sha256 below.
 
 ## Question
 
@@ -15,16 +15,16 @@ flips the strategy's signals at random at Claude's own observed rates?
 
 | Item | Value |
 |---|---|
-| Window | {{WINDOW}} |
+| Window | snapshot start to snapshot end (end exclusive), BTC-USD, ETH-USD, SOL-USD |
 | Data | `docs/data/*-1h.csv` (snapshot, committed) |
 | Strategy, risk engine, fees, slippage, cash | as in the existing `nulltest` (ensemble, `RiskConfig(max_open_positions=3)`, $25,000) |
-| Model id | `{{MODEL_ID}}` |
-| Prompt version | `{{PROMPT_VERSION}}` |
-| Prompt hash | `{{PROMPT_HASH}}` (sha256 of system prompt + user template, see `brain.PROMPT_HASH`) |
-| Prompts | {{N_PROMPTS}} account-free prompts, file sha256 `{{PROMPTS_SHA256}}` |
-| `max_tokens` | {{MAX_TOKENS}}; thinking disabled; no `temperature`/`top_p`/`top_k`; SDK `max_retries=0` |
-| Cost cap | ${{CAP_USD}} hard cap; the tool refuses to submit if its exact bound exceeds it |
-| Cost bound | ${{COST_BOUND_USD}} (batch price, 50% of list; input at 1 token per UTF-8 byte of system + prompt plus a fixed per-request allowance, output at n x `max_tokens`) |
+| Model id | `claude-haiku-5-5` |
+| Prompt version | `v2` |
+| Prompt hash | `677c6cec6a4a7acdbf61f8ed8b28e202b01fa6812d28036b7ac6794d0d21cdbe` (sha256 of system prompt + user template, see `brain.PROMPT_HASH`) |
+| Prompts | 4590 account-free prompts, file sha256 `f6ec21f27c5564654a26bee0d084f9227cabe4286ebaa04ff5846503267bf5b5` |
+| `max_tokens` | 200; thinking disabled; no `temperature`/`top_p`/`top_k`; SDK `max_retries=0` |
+| Cost cap | $1.00 hard cap; the tool refuses to submit if its exact bound exceeds it |
+| Cost bound | $0.505908 (batch price, 50% of list; input at 1 token per UTF-8 byte of system + prompt plus a fixed per-request allowance, output at n x `max_tokens`) |
 
 The prompt contains the signal side, strength, reason, its features and the price. It contains no equity and no
 position, so every prompt is known before anything is sent and a decision is a function of (model, prompt,
