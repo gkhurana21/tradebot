@@ -91,6 +91,14 @@ jobs:
       - name: Test the coin-flip significance test
         run: python tests/test_nulltest.py
 
+      # The Python half of the Python/Go sizing parity test, and the bridge's
+      # failure handling against a fake engine. The Go half runs in the Go job.
+      - name: Test the risk parity fixtures
+        run: python tests/test_risk_parity.py
+
+      - name: Test the Go bridge client
+        run: python tests/test_bridge.py
+
       # The graph tests fake every model call, so they need no key and no spend.
       - name: Test the research graph
         run: |
@@ -171,3 +179,67 @@ jobs:
       - name: Engine log
         if: always()
         run: cat /tmp/engine.log
+
+  # Python drives the real Go engine: every trade on this path is sized,
+  # approved and booked by Go. macOS because the Swift client probes the same
+  # engine afterwards. See scripts/ci_bridge.sh for the stages.
+  bridge:
+    name: Python -> Go bridge
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.22'
+          cache: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Build the dashboard
+        run: ./build.sh
+        working-directory: dashboard
+
+      - name: Start the engine on :8081
+        run: scripts/ci_bridge.sh start
+
+      - name: Run 300 bars through the engine and check the books agree
+        run: scripts/ci_bridge.sh run
+
+      # The Swift client must decode what the engine emitted after a real
+      # Python-driven run, and read the same counters Python recorded.
+      - name: Probe the engine with the Swift client
+        run: |
+          set -o pipefail
+          ./dashboard/.build/TradebotDashboard.app/Contents/MacOS/TradebotDashboard \
+            --probe --url http://127.0.0.1:8081 | tee /tmp/bridge/probe.txt
+
+      - name: Check the Swift probe against Python's record
+        run: scripts/ci_bridge.sh verify
+
+      # Fail closed: kill the engine mid-run. Python must stop with exit 2 and
+      # record nothing after the kill.
+      - name: Kill the engine mid-run
+        run: scripts/ci_bridge.sh kill
+
+      - name: Engine log
+        if: always()
+        run: |
+          cat /tmp/bridge/engine.log || true
+          scripts/ci_bridge.sh stop
+
+      - name: Keep the event logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-events
+          path: |
+            /tmp/bridge/*.jsonl
+            /tmp/bridge/*.txt
+            /tmp/bridge/*.log
+          if-no-files-found: ignore

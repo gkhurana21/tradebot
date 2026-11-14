@@ -105,6 +105,53 @@ the previous `next_seq`. Omit it to read everything retained. `gap` is `true`
 when entries the caller asked for were overwritten (`since < oldest_seq` after
 the ring has wrapped); the items returned then start at `oldest_seq`.
 
+## Driving the engine from Python
+
+```bash
+go run ./cmd/engine -venue sim -addr 127.0.0.1:8080 -profile conservative &
+python -m tradebot live --engine http://127.0.0.1:8080 --source synthetic --no-llm
+```
+
+With `--engine`, the Go engine is the only authority on that path. Python
+finds the trade and the engine does everything else:
+
+| Python (`src/tradebot/live/gate.py`, `GoGate`) | Go engine |
+|---|---|
+| sends each bar as `POST /tick?wait=1` (close, high, low) and records the exits it returns | marks the book, checks stops and targets, runs the kill switch |
+| sends every decision, FLAT and vetoes included, as `POST /decision` with a fresh `client_id` and the `boot_id` it saw at startup | sizes, approves or rejects, closes the opposite side on a flip, books the fill |
+| prints the verdict and fills exactly as the engine answered them | owns cash, positions and equity |
+
+Python never sizes an order, checks an exit, closes a flip leg, or keeps a
+kill switch or a book on this path (`tests/test_bridge.py` proves
+`RiskEngine.size_order` is never called). `--cash` and `--profile` are
+ignored with a warning: the engine's own `-cash` and `-profile` apply. The
+default `tradebot live` (no `--engine`) is unchanged and still sizes and fills
+in Python (`LocalGate`).
+
+Python refuses to start, and exits with code `2`, unless `GET /health` says
+`api: 2`, `venue: "sim"` and `live: false`. An `alpaca-paper` engine needs
+`--allow-venue alpaca-paper` and a real feed (`--source coinbase`); a live
+engine is always refused. It stops, exit code `2`, if `boot_id` changes (the
+engine restarted and its book is gone), on a `409`, or after five errors in a
+row.
+
+| What happened | What Python does |
+|---|---|
+| connection refused, DNS failure, connect timeout (nothing was sent) | `gate_error` event, no trade |
+| read timeout, dropped connection, `504`, other `5xx` after a decision was sent | `gate_unknown` event: the engine may have filled it. Pause, re-send the **same** `client_id` (the engine returns the stored result, never a second order) for up to 30 s, then stop with exit `2` |
+| tick `503` or a tick that times out | skip the bar, no decision on a stale mark |
+
+Events are JSON lines (`start`, `signal`, `verdict`, `fill`, `exit`, `halt`,
+`gate_error`, `gate_unknown`, `stop`); `--events-out PATH` also writes them to
+a file. `verdict` carries `rtt_ms`, the Python-to-Go `/decision` round trip.
+`scripts/ci_bridge.sh` and `tests/ci_bridge_check.py` run this end to end in CI
+and check Python's record against `/stats` and `/decisions`.
+
+Sizing is kept in step with the Python research engine by shared fixtures:
+`tests/fixtures/risk_parity.json` is read by `internal/risk/parity_test.go` and
+`tests/test_risk_parity.py`. The intentional differences are listed in
+`docs/DESIGN.md`, record 8.
+
 ## Benchmarks
 
 Apple M3, `go test -bench=. -benchmem`:
@@ -151,6 +198,7 @@ distance determine the quantity, then clamp to the notional cap.
 internal/risk    table-driven gate coverage, kill switch, concurrent access, benchmarks
 internal/book    P&L correctness (long, short, partial close, averaging), fees, races
 internal/engine  end-to-end flow, bracket exits, flips, halt propagation, shutdown
+internal/risk    also parity_test.go: shared fixtures with the Python risk engine
 ```
 
 Two behaviors worth noting, both tested:

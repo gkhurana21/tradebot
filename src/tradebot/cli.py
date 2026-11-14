@@ -4,7 +4,8 @@ Commands:
   backtest    single-symbol backtest
   portfolio   multi-symbol ensemble backtest
   optimize    walk-forward parameter search
-  live        live paper-trading loop (synthetic or coinbase feed)
+  live        live paper-trading loop (synthetic or coinbase feed); --engine URL
+              hands sizing, exits and the kill switch to the Go engine
   webhook     run the TradingView webhook receiver -> live paper trader
   dashboard   write an HTML report from a portfolio backtest
   onchain     print a live on-chain snapshot
@@ -26,6 +27,7 @@ from .core.strategy import (
     BollingerReversion, EmaRsiStrategy, EnsembleStrategy, PatternStrategy)
 from .data import feed
 from .live.engine import LiveConfig, LiveTrader
+from .live.gate import GateStop
 
 
 def _ensemble():
@@ -136,19 +138,56 @@ def cmd_live(a):
         tick = feed.make_synthetic_ticker(symbols[0])
     else:
         tick = lambda sym: feed.coinbase_latest(sym, granularity=60)
-    trader = LiveTrader(
-        _ensemble, Brain(use_llm=not a.no_llm),
-        RiskEngine(_risk(a)),
-        PaperBroker(a.cash), fetch_latest=tick,
-        config=LiveConfig(symbols=symbols, poll_seconds=a.poll, onchain_context=a.onchain),
-        on_event=lambda e: print(json.dumps(e)))
-    print(f"Live paper trader starting ({a.source} feed, {len(symbols)} symbols). "
-          f"Ctrl-C to stop.")
+
+    events_file = open(a.events_out, "w", buffering=1) if a.events_out else None
+
+    def on_event(e):
+        line = json.dumps(e)
+        print(line, flush=True)
+        if events_file:
+            events_file.write(line + "\n")
+
+    engine_url = getattr(a, "engine", None)
+    if engine_url:
+        from .live.gate import GoGate
+        ignored = [flag for flag, given in (("--cash", a.cash != 10_000.0),
+                                            ("--profile", a.profile is not None)) if given]
+        if ignored:
+            print(f"[live] warning: {' and '.join(ignored)} ignored with --engine; "
+                  f"the engine's own -cash and -profile apply", file=sys.stderr)
+        gate = GoGate(engine_url, allow_venue=a.allow_venue,
+                      synthetic=(a.source == "synthetic"))
+        trader = LiveTrader(
+            _ensemble, Brain(use_llm=not a.no_llm), fetch_latest=tick, gate=gate,
+            config=LiveConfig(symbols=symbols, poll_seconds=a.poll,
+                              onchain_context=a.onchain),
+            on_event=on_event)
+        banner = (f"Live trader starting (Go engine at {engine_url} sizes and approves; "
+                  f"{a.source} feed, {len(symbols)} symbols). Ctrl-C to stop.")
+    else:
+        if a.allow_venue:
+            raise SystemExit("--allow-venue only applies with --engine")
+        trader = LiveTrader(
+            _ensemble, Brain(use_llm=not a.no_llm),
+            RiskEngine(_risk(a)),
+            PaperBroker(a.cash), fetch_latest=tick,
+            config=LiveConfig(symbols=symbols, poll_seconds=a.poll, onchain_context=a.onchain),
+            on_event=on_event)
+        banner = (f"Live paper trader starting ({a.source} feed, {len(symbols)} symbols). "
+                  f"Ctrl-C to stop.")
+    # With --engine, stdout is a clean JSON-lines stream, so the banner goes to stderr.
+    print(banner, file=sys.stderr if engine_url else sys.stdout)
     try:
         trader.run(max_iterations=a.iterations)
     except KeyboardInterrupt:
         trader.stop()
         print("\nStopped.")
+    except GateStop as e:
+        print(f"[gate] STOPPED: {e.reason} (exit {e.code})", file=sys.stderr)
+        sys.exit(e.code)
+    finally:
+        if events_file:
+            events_file.close()
 
 
 def cmd_webhook(a):
@@ -452,6 +491,14 @@ def main(argv=None):
     lv.add_argument("--source", choices=["synthetic", "coinbase"], default="synthetic")
     lv.add_argument("--symbols", default="BTC-USD"); lv.add_argument("--poll", type=float, default=2.0)
     lv.add_argument("--iterations", type=int, default=None); lv.add_argument("--onchain", action="store_true")
+    lv.add_argument("--engine", default=None, metavar="URL",
+                    help="drive the Go engine at URL (e.g. http://127.0.0.1:8080): it sizes, "
+                         "approves and books every trade; --cash/--profile are ignored")
+    lv.add_argument("--allow-venue", choices=["alpaca-paper"], default=None, dest="allow_venue",
+                    help="with --engine, also drive an engine whose venue is alpaca-paper "
+                         "(never with --source synthetic; live engines are always refused)")
+    lv.add_argument("--events-out", default=None, dest="events_out", metavar="PATH",
+                    help="also write the JSON events to PATH, one per line")
     lv.set_defaults(func=cmd_live)
 
     wh = sub.add_parser("webhook"); common(wh)
