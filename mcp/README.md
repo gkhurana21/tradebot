@@ -11,7 +11,7 @@ Registered as a user-scope MCP server:
 
 | Tool | What it does |
 |---|---|
-| `backtest_run` | One backtest → return, max drawdown, Sharpe, win rate, profit factor, trade/signal/rejection counts, equity curve |
+| `backtest_run` | One backtest → return, max drawdown, Sharpe, win rate, profit factor, trade/order/signal/rejection counts, equity curve. `n_trades` is closed round trips; `n_orders` is orders submitted |
 | `backtest_sweep` | Same backtest across a range of one parameter, ranked by Sharpe. Finds which stop/target/confidence actually holds up |
 | `backtest_chart` | Runs a backtest and renders the equity curve to SVG (drawdown band shaded) |
 | `market_quote` | Live quote via the QuantCore Go proxy on :8080 |

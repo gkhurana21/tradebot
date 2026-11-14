@@ -18,7 +18,7 @@
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?style=flat-square&logo=swift&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude-brain%20%2B%20MCP-D97757?style=flat-square&logo=anthropic&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-109%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-117%20passing-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
 [What it does](#-what-it-does) • [Architecture](#-architecture) • [Try it](#-try-it-in-one-command) • [Under the hood](#-under-the-hood)
@@ -51,7 +51,7 @@ research-side bug cannot reach the market without passing the gate, because the 
 <tr>
 <td align="center" width="25%"><h3>104 ns</h3><sub>per risk-gate check, 0 allocations, race-tested</sub></td>
 <td align="center" width="25%"><h3>3</h3><sub>languages, each doing the job it is best at</sub></td>
-<td align="center" width="25%"><h3>109</h3><sub>tests across Go, Python and Swift, plus a cross-language CI job</sub></td>
+<td align="center" width="25%"><h3>117</h3><sub>tests across Go, Python and Swift, plus a cross-language CI job</sub></td>
 <td align="center" width="25%"><h3>2 flags</h3><sub>needed for real money, so one typo never trades it</sub></td>
 </tr>
 </table>
@@ -60,8 +60,8 @@ research-side bug cannot reach the market without passing the gate, because the 
 <tr>
 <td width="50%"><img src="docs/screenshots/dashboard.png" alt="SwiftUI dashboard showing equity, three open long positions with stops and targets, and one rejected decision"/><br/><b>The native monitor.</b> The SwiftUI dashboard watching the Go engine in sim mode: three positions with
 their stops and targets, and one proposal the gate rejected for low confidence.</td>
-<td width="50%"><img src="docs/screenshots/backtest-report.png" alt="HTML backtest report with stat tiles and an equity curve that goes flat after the kill switch fires"/><br/><b>The kill switch, working.</b> A losing three-symbol backtest. Once equity fell 5% below where it started,
-the gate halted trading and nothing traded again. That flat line is the feature.</td>
+<td width="50%"><img src="docs/screenshots/backtest-report.png" alt="HTML backtest report with stat tiles and an equity curve that bleeds steadily to minus 40 percent"/><br/><b>What no edge looks like.</b> The default strategy on a random walk with real fees and slippage:
+979 trades, −40%. The daily kill switch caps each day's loss; it cannot create an edge. Showing that is the job.</td>
 </tr>
 </table>
 
@@ -74,7 +74,7 @@ the gate halted trading and nothing traded again. That flat line is the feature.
 the judge is ever called. A failed critique counts as maximum doubt, never as "no objection".</td>
 <td width="50%"><b>🛡️ A risk gate that can say no.</b> Position caps, risk-per-trade, stop-loss, confidence floor,
 max open positions and a daily-drawdown kill switch. Rejections are typed values you can count and alert on.
-Recovering equity does not clear a halt; only a new session does.</td>
+Recovering equity does not clear a halt; only a new session does (the next UTC day in Python, a restart in the Go engine).</td>
 </tr>
 <tr>
 <td><b>📈 Honest backtesting.</b> The backtest runs the exact code path a live run would. Walk-forward optimization
@@ -267,8 +267,8 @@ trading was never built there.
 | Suite | Command | Count |
 |---|---|---|
 | Go | `cd engine && go test -race ./...` | 45 tests + 3 benchmarks |
-| Python | `tests/test_core.py`, `tests/test_graph.py` | 20 + 13 tests |
-| Swift | `cd dashboard && ./test.sh` | 31 checks |
+| Python | `tests/test_core.py`, `tests/test_graph.py` | 23 + 13 tests |
+| Swift | `cd dashboard && ./test.sh` | 36 checks |
 
 CI runs all three on every push, plus an **integration job** that starts the Go engine, drives a trade through the
 risk gate and probes it with the Swift client: the cross-language seam unit tests cannot cover.

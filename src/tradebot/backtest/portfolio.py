@@ -26,9 +26,9 @@ class PortfolioResult:
     timestamps: list = field(default_factory=list)
     trades: list = field(default_factory=list)
     metrics: m.Metrics = field(default_factory=m.Metrics)
-    per_symbol: dict = field(default_factory=dict)
+    per_symbol: dict = field(default_factory=dict)   # orders per symbol
     n_signals: int = 0
-    n_trades: int = 0
+    n_orders: int = 0      # entries/flips submitted; closed round trips are metrics.n_trades
     n_rejected: int = 0
 
     @property
@@ -42,7 +42,7 @@ class PortfolioResult:
             f"Sharpe: {self.metrics.sharpe:.2f}  "
             f"Win%: {self.metrics.win_rate_pct:.0f}  "
             f"PF: {self.metrics.profit_factor:.2f}  "
-            f"Trades: {self.n_trades} ({by_sym})  Rejected: {self.n_rejected}  "
+            f"Trades: {self.metrics.n_trades}  Orders: {self.n_orders} ({by_sym})  Rejected: {self.n_rejected}  "
             f"Equity: {self.starting_equity:,.0f} -> {self.ending_equity:,.0f}"
         )
 
@@ -78,6 +78,7 @@ class PortfolioBacktester:
         self.risk.start_day(self.broker.account().equity)
 
         for candle in events:
+            self.risk.roll_day(candle.ts, self.broker.account().equity)
             self.broker.mark(candle.symbol, candle.close, candle.ts)
             self._check_exits(candle)
 
@@ -95,7 +96,7 @@ class PortfolioBacktester:
                     if not pos.is_flat and ((pos.qty > 0) != (order.side == Side.BUY)):
                         self.broker.close(order.symbol, reason="flip")
                     self.broker.submit(order)
-                    res.n_trades += 1
+                    res.n_orders += 1
                     res.per_symbol[candle.symbol] += 1
 
             self.risk.check_kill_switch(self.broker.account())

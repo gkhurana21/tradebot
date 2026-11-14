@@ -81,6 +81,56 @@ def test_kill_switch_halts():
     assert order is None and "halted" in reason
 
 
+def test_kill_switch_holds_for_the_day_then_resets():
+    from datetime import timedelta
+    r = RiskEngine(RiskConfig(max_daily_drawdown_pct=0.05))
+    acct = Account(cash=10_000, equity=10_000)
+    r.start_day(10_000)
+    assert r.roll_day(TS, 10_000) is False          # first bar only records the day
+    acct.equity = 9_400
+    assert r.check_kill_switch(acct) is True
+    # Recovering equity later the same day does not clear the halt.
+    assert r.roll_day(TS + timedelta(hours=5), 9_900) is False
+    acct.equity = 9_900
+    assert r.check_kill_switch(acct) is True
+    # The next UTC day starts a fresh session from that day's opening equity.
+    assert r.roll_day(TS + timedelta(days=1), 9_900) is True
+    assert r.check_kill_switch(acct) is False
+    acct.equity = 9_400                              # -5.05% from 9,900
+    assert r.check_kill_switch(acct) is True
+
+
+def test_backtests_roll_the_risk_day_each_bar():
+    from tradebot.backtest.portfolio import PortfolioBacktester
+
+    class CountingRisk(RiskEngine):
+        def __init__(self):
+            super().__init__()
+            self.rolls = 0
+
+        def roll_day(self, ts, equity):
+            rolled = super().roll_day(ts, equity)
+            self.rolls += rolled
+            return rolled
+
+    candles = list(feed.synthetic_candles(n=72, seed=1))   # hourly: three days
+    days = len({c.ts.date() for c in candles})
+    single, multi = CountingRisk(), CountingRisk()
+    Backtester(EmaRsiStrategy(), Brain(use_llm=False), single,
+               PaperBroker(10_000)).run(candles)
+    PortfolioBacktester(EmaRsiStrategy, Brain(use_llm=False), multi,
+                        PaperBroker(10_000)).run({"BTC-USD": candles})
+    assert single.rolls == multi.rolls == days - 1
+
+
+def test_summary_trades_are_round_trips():
+    r = Backtester(EmaRsiStrategy(), Brain(use_llm=False), RiskEngine(),
+                   PaperBroker(10_000)).run(list(feed.synthetic_candles(n=500, seed=7)))
+    assert r.metrics.n_trades == len(r.trades)
+    assert f"Trades: {len(r.trades)} " in r.summary()
+    assert f"Orders: {r.n_orders} " in r.summary()
+
+
 def test_risk_blocks_stacking_past_cap():
     cfg = RiskConfig(max_position_pct=0.2, risk_per_trade_pct=1.0,
                      stop_loss_pct=0.02, min_confidence=0.0)
@@ -129,7 +179,8 @@ def test_backtest_runs_and_is_deterministic():
     candles = list(feed.synthetic_candles(n=500, seed=7))
     r1 = make().run(candles)
     r2 = make().run(list(feed.synthetic_candles(n=500, seed=7)))
-    assert r1.n_trades == r2.n_trades
+    assert r1.n_orders == r2.n_orders
+    assert r1.metrics.n_trades == r2.metrics.n_trades
     assert abs(r1.ending_equity - r2.ending_equity) < 1e-6
     assert len(r1.equity_curve) == 500
 

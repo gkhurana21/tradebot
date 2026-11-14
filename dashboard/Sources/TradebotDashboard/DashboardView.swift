@@ -111,16 +111,20 @@ struct DashboardView: View {
                 if model.equityHistory.count < 2 {
                     placeholder("Waiting for samples…")
                 } else {
+                    let domain = model.equityDomain
                     Chart(model.equityHistory) { point in
+                        // The fill starts at the axis floor, not at zero, or the
+                        // area would force the scale back down to zero.
                         AreaMark(x: .value("Time", point.time),
-                                 y: .value("Equity", point.equity))
+                                 yStart: .value("Floor", domain.lowerBound),
+                                 yEnd: .value("Equity", point.equity))
                             .foregroundStyle(chartTint.opacity(0.12))
                         LineMark(x: .value("Time", point.time),
                                  y: .value("Equity", point.equity))
                             .foregroundStyle(chartTint)
                             .lineStyle(StrokeStyle(lineWidth: 2))
                     }
-                    .chartYScale(domain: .automatic(includesZero: false))
+                    .chartYScale(domain: domain)
                     .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) }
                     .frame(height: 200)
                 }

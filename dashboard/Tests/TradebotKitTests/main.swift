@@ -198,6 +198,36 @@ await suite("model accumulates equity history and derives session stats") { @Mai
     checkClose(model.equityHistory.first?.equity ?? 0, 10_500, "oldest sample dropped")
 }
 
+await suite("equity chart range hugs the data instead of starting at zero") { @MainActor in
+    let model = DashboardModel(client: makeClient())
+    let t0 = Date()
+    @MainActor func push(_ equity: Double, _ offset: TimeInterval) {
+        model.apply(
+            stats: EngineStats(decisions: 1, equity: equity),
+            portfolio: PortfolioSnapshot(equity: equity, cash: equity, positions: [:]),
+            at: t0.addingTimeInterval(offset)
+        )
+    }
+
+    checkEqual(model.equityDomain, 0...1, "no samples gives a placeholder range")
+
+    push(25_000, 0)
+    push(25_400, 1)
+    push(24_800, 2)
+    let domain = model.equityDomain
+    check(domain.lowerBound > 20_000, "range does not reach down toward zero")
+    check(domain.lowerBound < 24_800 && domain.upperBound > 25_400, "range contains every sample")
+    checkClose(domain.upperBound - domain.lowerBound, 600 * 1.3, "15% headroom each side of the span")
+
+    // A flat session keeps a sane minimum height instead of zooming into noise.
+    let flat = DashboardModel(client: makeClient())
+    flat.apply(stats: EngineStats(decisions: 0, equity: 25_000),
+               portfolio: PortfolioSnapshot(equity: 25_000, cash: 25_000, positions: [:]),
+               at: t0)
+    checkClose(flat.equityDomain.upperBound - flat.equityDomain.lowerBound, 50,
+               "flat range padded by 0.1% of equity each side")
+}
+
 await suite("model tolerates one dropped poll before reporting failure") { @MainActor in
     let offline = EngineClient(
         baseURL: URL(string: "http://127.0.0.1:8080")!,
