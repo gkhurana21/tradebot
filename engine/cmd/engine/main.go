@@ -26,9 +26,13 @@ import (
 	"github.com/gkhurana21/tradebot/engine/internal/venue"
 )
 
+// defaultAddr binds loopback only: the engine has no authentication, so it must
+// not be reachable from the network unless the operator opts in with -addr.
+const defaultAddr = "127.0.0.1:8080"
+
 func main() {
 	var (
-		addr      = flag.String("addr", ":8080", "HTTP listen address")
+		addr      = flag.String("addr", defaultAddr, "HTTP listen address (loopback by default; pass :8080 to expose)")
 		profile   = flag.String("profile", "balanced", "risk profile: conservative | balanced | aggressive")
 		cash      = flag.Float64("cash", 10_000, "starting cash (simulated venue only)")
 		feePct    = flag.Float64("fee", 0.001, "taker fee as a fraction of notional")
@@ -93,7 +97,7 @@ func main() {
 		Handler:           api.NewServer(eng, b, log).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      eng.DecisionTimeout() + 5*time.Second, // must outlast the slowest decision
 		IdleTimeout:       60 * time.Second,
 	}
 

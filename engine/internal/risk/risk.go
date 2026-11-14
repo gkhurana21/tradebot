@@ -153,6 +153,14 @@ func (e *Engine) Halted() bool {
 	return e.halted
 }
 
+// SessionStartEquity returns the baseline the kill switch measures against, or
+// zero before a session has started.
+func (e *Engine) SessionStartEquity() float64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.dayStartEquity
+}
+
 // Drawdown returns the current session drawdown as a fraction of the starting
 // equity. Negative values mean the session is up.
 func (e *Engine) Drawdown(equity float64) float64 {

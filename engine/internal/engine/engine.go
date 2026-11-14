@@ -29,6 +29,17 @@ const venueTimeout = 10 * time.Second
 // ErrClosed is returned when work is submitted to a stopped engine.
 var ErrClosed = errors.New("engine: closed")
 
+// ErrBusy is returned when a synchronous tick cannot be queued because the
+// tick buffer is full. The caller must treat the tick as not applied.
+var ErrBusy = errors.New("engine: tick buffer full")
+
+// simDecisionTimeout bounds a decision when execution is simulated: the owner
+// goroutine answers immediately, so this only guards a wedged engine.
+const simDecisionTimeout = 5 * time.Second
+
+// idempotencyWindow is how many recent client_ids are remembered.
+const idempotencyWindow = 4096
+
 // Tick is a market data update.
 type Tick struct {
 	Symbol string
@@ -36,6 +47,84 @@ type Tick struct {
 	High   float64 // intrabar extremes; zero means "use Price"
 	Low    float64
 	TS     time.Time
+
+	// reply, when set, receives the outcome once the owner goroutine has
+	// applied the tick. Buffered (cap 1) so the owner never blocks on it.
+	reply chan TickResult
+}
+
+// TickResult is the outcome of a synchronously applied tick.
+type TickResult struct {
+	Equity float64      `json:"equity"`
+	Halted bool         `json:"halted"`
+	Exits  []types.Fill `json:"exits"`
+}
+
+// Limits are the hard risk limits in force, as configured fractions
+// (0.05 means 5%).
+type Limits struct {
+	MaxDailyDrawdownPct float64 `json:"max_daily_drawdown_pct"`
+	MaxOpenPositions    int     `json:"max_open_positions"`
+	MinConfidence       float64 `json:"min_confidence"`
+	MaxPositionPct      float64 `json:"max_position_pct"`
+}
+
+// DecisionOutcome is everything one decision produced: the verdict and every
+// fill it caused, including the close leg of a flip.
+type DecisionOutcome struct {
+	Result   risk.Result
+	Fills    []types.Fill
+	ClientID string
+	// Replayed is true when this is the stored outcome of an earlier request
+	// with the same client_id; no new order was considered.
+	Replayed bool
+}
+
+// pendingDecision carries one decision through the owner goroutine and lets
+// any number of callers wait for its outcome. done is closed after out is set.
+type pendingDecision struct {
+	decision types.Decision
+	clientID string
+	done     chan struct{}
+	out      DecisionOutcome
+}
+
+// idempotency remembers the last idempotencyWindow client_ids so a retried
+// request returns the original outcome instead of placing a second order. It
+// has its own mutex because HTTP handlers touch it concurrently; it never
+// touches book or risk state.
+type idempotency struct {
+	mu   sync.Mutex
+	byID map[string]*pendingDecision
+	ring [idempotencyWindow]*pendingDecision
+	next int
+}
+
+// claim registers p under its client_id. If the id is already known it
+// returns the earlier entry and true.
+func (m *idempotency) claim(p *pendingDecision) (*pendingDecision, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if prev, ok := m.byID[p.clientID]; ok {
+		return prev, true
+	}
+	if old := m.ring[m.next]; old != nil && m.byID[old.clientID] == old {
+		delete(m.byID, old.clientID)
+	}
+	m.ring[m.next] = p
+	m.next = (m.next + 1) % idempotencyWindow
+	m.byID[p.clientID] = p
+	return p, false
+}
+
+// forget removes p when it never reached the owner goroutine, so a retry can
+// run fresh.
+func (m *idempotency) forget(p *pendingDecision) {
+	m.mu.Lock()
+	if m.byID[p.clientID] == p {
+		delete(m.byID, p.clientID)
+	}
+	m.mu.Unlock()
 }
 
 // EventKind classifies an engine event.
@@ -75,6 +164,9 @@ type Stats struct {
 	// says whether they risk real money, so a monitor never has to guess.
 	Venue string `json:"venue"`
 	Live  bool   `json:"live"`
+	// SessionStartEquity is the kill-switch baseline (process lifetime).
+	SessionStartEquity float64 `json:"session_start_equity"`
+	Limits             Limits  `json:"limits"`
 }
 
 // Engine owns the book and risk gate and serializes all mutations.
@@ -88,8 +180,11 @@ type Engine struct {
 	baseCtx context.Context
 
 	ticks     chan Tick
-	decisions chan decisionReq
+	decisions chan *pendingDecision
 	events    chan Event
+
+	journal *journal
+	idem    idempotency
 
 	startOnce sync.Once
 	stopOnce  sync.Once
@@ -99,11 +194,6 @@ type Engine struct {
 
 	nTicks, nDecisions, nFills, nRejected, nExits atomic.Uint64
 	nOrders                                       atomic.Uint64
-}
-
-type decisionReq struct {
-	decision types.Decision
-	result   chan risk.Result // optional; nil for fire-and-forget
 }
 
 // Option configures an Engine.
@@ -126,9 +216,11 @@ func New(b *book.Book, r *risk.Engine, opts ...Option) *Engine {
 		risk:      r,
 		baseCtx:   context.Background(),
 		ticks:     make(chan Tick, 1024),
-		decisions: make(chan decisionReq, 256),
+		decisions: make(chan *pendingDecision, 256),
 		events:    make(chan Event, 1024),
 		done:      make(chan struct{}),
+		journal:   newJournal(),
+		idem:      idempotency{byID: make(map[string]*pendingDecision)},
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -178,29 +270,91 @@ func (e *Engine) SubmitTick(t Tick) error {
 	}
 }
 
+// SubmitTickWait delivers market data and blocks until the owner goroutine has
+// applied it, returning the exits it caused and the halt state. Unlike
+// SubmitTick it never drops: a full buffer returns ErrBusy so the caller knows
+// the tick was not applied. If ctx expires after the tick was queued it is
+// still applied; only the reply is lost.
+func (e *Engine) SubmitTickWait(ctx context.Context, t Tick) (TickResult, error) {
+	if e.closed.Load() {
+		return TickResult{}, ErrClosed
+	}
+	t.reply = make(chan TickResult, 1)
+	select {
+	case e.ticks <- t:
+	default:
+		return TickResult{}, ErrBusy
+	}
+	select {
+	case res := <-t.reply:
+		return res, nil
+	case <-ctx.Done():
+		return TickResult{}, ctx.Err()
+	case <-e.done:
+		return TickResult{}, ErrClosed
+	}
+}
+
 // SubmitDecision evaluates a decision and blocks until the owner goroutine
 // returns the verdict, or ctx is cancelled.
 func (e *Engine) SubmitDecision(ctx context.Context, d types.Decision) (risk.Result, error) {
+	out, err := e.SubmitDecisionFull(ctx, d, "")
+	return out.Result, err
+}
+
+// SubmitDecisionFull is SubmitDecision with a client_id and the full outcome
+// (fills included). A non-empty clientID is recorded on arrival: a repeat
+// returns the stored outcome (waiting for the original if it is still in
+// flight) and never evaluates the decision a second time.
+func (e *Engine) SubmitDecisionFull(ctx context.Context, d types.Decision, clientID string) (DecisionOutcome, error) {
 	if e.closed.Load() {
-		return risk.Result{}, ErrClosed
+		return DecisionOutcome{}, ErrClosed
 	}
-	reply := make(chan risk.Result, 1)
-	select {
-	case e.decisions <- decisionReq{decision: d, result: reply}:
-	case <-ctx.Done():
-		return risk.Result{}, ctx.Err()
-	case <-e.done:
-		return risk.Result{}, ErrClosed
+	p := &pendingDecision{decision: d, clientID: clientID, done: make(chan struct{})}
+	if clientID != "" {
+		if prev, replay := e.idem.claim(p); replay {
+			out, err := e.await(ctx, prev)
+			out.Replayed = true
+			return out, err
+		}
 	}
 	select {
-	case res := <-reply:
-		return res, nil
+	case e.decisions <- p:
 	case <-ctx.Done():
-		return risk.Result{}, ctx.Err()
+		e.idem.forget(p)
+		return DecisionOutcome{}, ctx.Err()
 	case <-e.done:
-		return risk.Result{}, ErrClosed
+		e.idem.forget(p)
+		return DecisionOutcome{}, ErrClosed
+	}
+	return e.await(ctx, p)
+}
+
+func (e *Engine) await(ctx context.Context, p *pendingDecision) (DecisionOutcome, error) {
+	select {
+	case <-p.done:
+		return p.out, nil
+	case <-ctx.Done():
+		return DecisionOutcome{}, ctx.Err()
+	case <-e.done:
+		return DecisionOutcome{}, ErrClosed
 	}
 }
+
+// DecisionTimeout is how long an HTTP caller should wait for a decision. In
+// simulation the owner answers immediately. With a venue the worst case is a
+// flip: two venue calls (close, then place), each bounded by venueTimeout --
+// retries happen inside that bound, they do not extend it -- plus margin.
+func (e *Engine) DecisionTimeout() time.Duration {
+	if e.venue == nil {
+		return simDecisionTimeout
+	}
+	return 2*venueTimeout + 2*time.Second
+}
+
+// Journal returns recent outcomes with seq >= since (all retained when since
+// is nil).
+func (e *Engine) Journal(since *uint64) JournalPage { return e.journal.read(since) }
 
 // Stats returns a consistent counter snapshot.
 func (e *Engine) Stats() Stats {
@@ -213,6 +367,15 @@ func (e *Engine) Stats() Stats {
 		Halted:    e.risk.Halted(),
 		Equity:    e.book.Equity(),
 		Venue:     "sim",
+
+		SessionStartEquity: e.risk.SessionStartEquity(),
+	}
+	cfg := e.risk.Config()
+	s.Limits = Limits{
+		MaxDailyDrawdownPct: cfg.MaxDailyDrawdownPct,
+		MaxOpenPositions:    cfg.MaxOpenPositions,
+		MinConfidence:       cfg.MinConfidence,
+		MaxPositionPct:      cfg.MaxPositionPct,
 	}
 	if e.venue != nil {
 		s.Venue, s.Live = e.venue.Name(), e.venue.IsLive()
@@ -231,36 +394,49 @@ func (e *Engine) run(ctx context.Context) {
 		case <-e.done:
 			return
 		case t := <-e.ticks:
-			e.handleTick(t)
-		case req := <-e.decisions:
-			res := e.handleDecision(req.decision)
-			if req.result != nil {
-				req.result <- res
+			res := e.handleTick(t)
+			if t.reply != nil {
+				t.reply <- res
 			}
+		case p := <-e.decisions:
+			p.out = e.handleDecision(p)
+			close(p.done)
 		}
 	}
 }
 
-func (e *Engine) handleTick(t Tick) {
+func (e *Engine) handleTick(t Tick) TickResult {
 	e.nTicks.Add(1)
 	e.book.Mark(t.Symbol, t.Price)
-	e.checkBrackets(t)
+	exits := []types.Fill{}
+	if fill, ok := e.checkBrackets(t); ok {
+		exits = append(exits, fill)
+	}
 
-	if e.risk.CheckKillSwitch(e.book.Equity()) {
+	wasHalted := e.risk.Halted()
+	equity := e.book.Equity()
+	halted := e.risk.CheckKillSwitch(equity)
+	if halted {
 		e.emit(Event{
-			Kind: EventHalt, TS: t.TS, Equity: e.book.Equity(),
+			Kind: EventHalt, TS: t.TS, Equity: equity,
 			Reason: "daily drawdown kill switch tripped",
 		})
+		if !wasHalted {
+			e.journal.append(JournalEntry{
+				Kind: JournalHalt, Reason: e.risk.HaltReason(equity),
+			})
+		}
 	}
+	return TickResult{Equity: equity, Halted: halted, Exits: exits}
 }
 
 // checkBrackets closes a position whose stop or target was touched this tick.
 // The stop is evaluated first: when a bar straddles both levels we cannot know
 // which came first, so we assume the adverse one to avoid flattering results.
-func (e *Engine) checkBrackets(t Tick) {
+func (e *Engine) checkBrackets(t Tick) (types.Fill, bool) {
 	pos := e.book.Position(t.Symbol)
 	if pos.IsFlat() {
-		return
+		return types.Fill{}, false
 	}
 	high, low := t.High, t.Low
 	if high <= 0 {
@@ -273,13 +449,13 @@ func (e *Engine) checkBrackets(t Tick) {
 
 	hitStop := pos.StopLoss > 0 && ((long && low <= pos.StopLoss) || (!long && high >= pos.StopLoss))
 	if hitStop {
-		e.exitAt(t, pos.StopLoss, "stop")
-		return
+		return e.exitAt(t, pos.StopLoss, "stop")
 	}
 	hitTarget := pos.TakeProfit > 0 && ((long && high >= pos.TakeProfit) || (!long && low <= pos.TakeProfit))
 	if hitTarget {
-		e.exitAt(t, pos.TakeProfit, "target")
+		return e.exitAt(t, pos.TakeProfit, "target")
 	}
+	return types.Fill{}, false
 }
 
 // exitAt flattens a position whose bracket was touched.
@@ -287,34 +463,63 @@ func (e *Engine) checkBrackets(t Tick) {
 // With a venue attached the exit is a real market order -- Alpaca does not
 // hold brackets on crypto, so the engine is the only thing watching the stop.
 // Simulated mode fills at the exact bracket level instead.
-func (e *Engine) exitAt(t Tick, level float64, reason string) {
+func (e *Engine) exitAt(t Tick, level float64, reason string) (types.Fill, bool) {
 	if e.venue != nil {
-		before := e.nExits.Load()
-		e.closePosition(t.Symbol, reason)
-		if e.nExits.Load() > before {
+		fill, ok := e.closePosition(t.Symbol, reason)
+		if ok {
 			e.emit(Event{
 				Kind: EventExit, TS: t.TS, Symbol: t.Symbol,
 				Equity: e.book.Equity(), Reason: reason,
 			})
+			e.journalExit("", fill)
 		}
-		return
+		return fill, ok
 	}
 
 	e.book.Mark(t.Symbol, level)
 	fill, ok := e.book.Close(t.Symbol, reason)
 	e.book.Mark(t.Symbol, t.Price)
 	if !ok {
-		return
+		return types.Fill{}, false
 	}
 	e.nExits.Add(1)
 	e.emit(Event{
 		Kind: EventExit, TS: t.TS, Symbol: t.Symbol, Side: fill.Side,
 		Qty: fill.Qty, Price: fill.Price, Equity: e.book.Equity(), Reason: reason,
 	})
+	e.journalExit("", fill)
+	return fill, true
 }
 
-func (e *Engine) handleDecision(d types.Decision) risk.Result {
+// journalExit records a position close (bracket exit or flip leg).
+func (e *Engine) journalExit(clientID string, f types.Fill) {
+	qty, price := f.Qty, f.Price
+	e.journal.append(JournalEntry{
+		Kind: JournalExit, ClientID: clientID, Symbol: f.Symbol, Side: f.Side,
+		Reason: fmt.Sprintf("%s: closed %s @ %.2f", f.Reason, f.Symbol, f.Price),
+		Qty:    &qty, Price: &price,
+	})
+}
+
+// journalDecision records one decision outcome. fill is the entry fill, if any.
+func (e *Engine) journalDecision(p *pendingDecision, res risk.Result, fill *types.Fill) {
+	conf, approved := p.decision.Confidence, res.Verdict.OK()
+	entry := JournalEntry{
+		Kind: JournalDecision, ClientID: p.clientID, Symbol: p.decision.Symbol,
+		Side: p.decision.Side, Confidence: &conf, Verdict: string(res.Verdict),
+		Approved: &approved, Reason: res.Reason,
+	}
+	if fill != nil {
+		qty, price := fill.Qty, fill.Price
+		entry.Qty, entry.Price = &qty, &price
+	}
+	e.journal.append(entry)
+}
+
+func (e *Engine) handleDecision(p *pendingDecision) DecisionOutcome {
+	d := p.decision
 	e.nDecisions.Add(1)
+	out := DecisionOutcome{ClientID: p.clientID, Fills: []types.Fill{}}
 
 	price, ok := e.book.Price(d.Symbol)
 	if !ok {
@@ -324,24 +529,34 @@ func (e *Engine) handleDecision(d types.Decision) risk.Result {
 			Kind: EventRejected, TS: d.TS, Symbol: d.Symbol,
 			Verdict: res.Verdict, Reason: res.Reason, Equity: e.book.Equity(),
 		})
-		return res
+		e.journalDecision(p, res, nil)
+		out.Result = res
+		return out
 	}
 
 	equity, positions := e.book.Snapshot()
-	res := e.risk.Evaluate(d, risk.Account{Equity: equity, Positions: positions}, price)
+	acct := risk.Account{Equity: equity, Positions: positions}
+	res := e.risk.Evaluate(d, acct, price)
+	res.Reason = e.risk.Explain(d, acct, price, res)
 	if !res.Verdict.OK() {
 		e.nRejected.Add(1)
 		e.emit(Event{
 			Kind: EventRejected, TS: d.TS, Symbol: d.Symbol, Side: d.Side,
 			Verdict: res.Verdict, Reason: res.Reason, Equity: equity,
 		})
-		return res
+		e.journalDecision(p, res, nil)
+		out.Result = res
+		return out
 	}
 
 	// Flip: flatten an opposing position before entering the other way, so we
-	// never hold both directions at once.
+	// never hold both directions at once. The close leg is reported to the
+	// caller and journaled; it is an exit, not a fill, in the counters.
 	if pos := positions[d.Symbol]; !pos.IsFlat() && d.Side.Opposes(pos.Qty) {
-		e.closePosition(d.Symbol, "flip")
+		if closeFill, closed := e.closePosition(d.Symbol, "flip"); closed {
+			out.Fills = append(out.Fills, closeFill)
+			e.journalExit(p.clientID, closeFill)
+		}
 	}
 
 	var fill types.Fill
@@ -355,13 +570,17 @@ func (e *Engine) handleDecision(d types.Decision) risk.Result {
 				Kind: EventRejected, TS: d.TS, Symbol: d.Symbol, Side: d.Side,
 				Verdict: res.Verdict, Reason: res.Reason, Equity: e.book.Equity(),
 			})
-			return res
+			e.journalDecision(p, res, nil)
+			out.Result = res
+			return out
 		}
 		// A venue can accept an order without filling it yet. Report that
 		// honestly rather than counting a fill that has not happened.
 		if fill.Qty <= 0 {
 			res.Reason = "accepted by venue, not yet filled"
-			return res
+			e.journalDecision(p, res, nil)
+			out.Result = res
+			return out
 		}
 		e.book.RecordFill(fill, res.Order.StopLoss, res.Order.TakeProfit)
 	} else {
@@ -370,7 +589,9 @@ func (e *Engine) handleDecision(d types.Decision) risk.Result {
 		if !ok {
 			res.Verdict, res.Reason = risk.RejectInvalid, "execution rejected by book"
 			e.nRejected.Add(1)
-			return res
+			e.journalDecision(p, res, nil)
+			out.Result = res
+			return out
 		}
 	}
 
@@ -380,7 +601,10 @@ func (e *Engine) handleDecision(d types.Decision) risk.Result {
 		Qty: fill.Qty, Price: fill.Price, Equity: e.book.Equity(),
 		Verdict: res.Verdict, Reason: res.Order.Tag,
 	})
-	return res
+	out.Fills = append(out.Fills, fill)
+	e.journalDecision(p, res, &fill)
+	out.Result = res
+	return out
 }
 
 // placeAtVenue sends an approved order to the live venue.
@@ -403,13 +627,14 @@ func (e *Engine) placeAtVenue(order types.Order, held types.Position) (types.Fil
 }
 
 // closePosition flattens a symbol at the venue when one is attached, and in
-// the local book otherwise.
-func (e *Engine) closePosition(symbol, reason string) {
+// the local book otherwise. It returns the closing fill when one happened.
+func (e *Engine) closePosition(symbol, reason string) (types.Fill, bool) {
 	if e.venue == nil {
-		if _, closed := e.book.Close(symbol, reason); closed {
+		fill, closed := e.book.Close(symbol, reason)
+		if closed {
 			e.nExits.Add(1)
 		}
-		return
+		return fill, closed
 	}
 
 	ctx, cancel := context.WithTimeout(e.baseCtx, venueTimeout)
@@ -425,12 +650,17 @@ func (e *Engine) closePosition(symbol, reason string) {
 			Reason: "CLOSE FAILED at venue, position may still be open: " + err.Error(),
 			Equity: e.book.Equity(),
 		})
-		return
+		return types.Fill{}, false
 	}
 	if fill.Qty > 0 {
+		if fill.Reason == "" {
+			fill.Reason = reason
+		}
 		e.book.RecordFill(fill, 0, 0)
 		e.nExits.Add(1)
+		return fill, true
 	}
+	return types.Fill{}, false
 }
 
 // emit publishes an event, dropping it if no consumer is keeping up.
