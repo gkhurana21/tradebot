@@ -318,3 +318,29 @@ func TestStatsReportWhereOrdersGo(t *testing.T) {
 		t.Error("a live venue must be reported as live")
 	}
 }
+
+func TestFlipIsRefusedWhenTheCloseLegFails(t *testing.T) {
+	fv := newFakeVenue()
+	e, b := venueEngine(t, fv)
+	e.SubmitTick(Tick{Symbol: "BTC-USD", Price: 100, TS: time.Now()})
+	waitFor(t, func() bool { return e.Stats().Ticks >= 1 })
+	e.SubmitDecision(context.Background(), buy("BTC-USD", 0.9))
+	held := b.Position("BTC-USD").Qty
+	if held <= 0 {
+		t.Fatal("setup failed: no long position")
+	}
+	fv.mu.Lock()
+	fv.closeErr = errors.New("venue unreachable")
+	fv.mu.Unlock()
+
+	out, err := e.SubmitDecisionFull(context.Background(), sell("BTC-USD", 0.9), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Result.Verdict.OK() {
+		t.Fatalf("verdict = %s, want a rejection when the flip close failed", out.Result.Verdict)
+	}
+	if got := b.Position("BTC-USD").Qty; got != held {
+		t.Errorf("book qty = %v, want %v: nothing should have been entered", got, held)
+	}
+}

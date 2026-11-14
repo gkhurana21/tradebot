@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -428,5 +429,19 @@ func TestVenueFlipReportsCloseLegAndJournalsIt(t *testing.T) {
 	out, err := e.SubmitDecisionFull(context.Background(), sell("BTC-USD", 0.9), "f")
 	if err != nil || len(out.Fills) < 1 || out.Fills[0].Reason != "flip" {
 		t.Fatalf("out = %+v, %v", out, err)
+	}
+}
+
+func TestClientIDReusedForADifferentDecisionIsRefused(t *testing.T) {
+	e, _, _ := newTestEngine(t, 10_000, risk.Balanced())
+	drain(e)
+	e.SubmitTickWait(context.Background(), Tick{Symbol: "BTC-USD", Price: 100, TS: time.Now()})
+	d := types.Decision{Symbol: "BTC-USD", Side: types.Buy, Confidence: 0.9, SizeHint: 1}
+	if _, err := e.SubmitDecisionFull(context.Background(), d, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	d.Side = types.Sell
+	if _, err := e.SubmitDecisionFull(context.Background(), d, "abc"); !errors.Is(err, ErrIDReused) {
+		t.Fatalf("err = %v, want ErrIDReused", err)
 	}
 }

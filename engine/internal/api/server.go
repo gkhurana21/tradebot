@@ -160,7 +160,13 @@ func (s *Server) handleTick(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if wait := r.URL.Query().Get("wait"); wait == "1" || wait == "true" {
-		ctx, cancel := context.WithTimeout(r.Context(), tickWaitTimeout)
+		// A tick can trigger a bracket exit, which at a venue is a real close
+		// order: wait as long as the slowest decision, never less.
+		wait := tickWaitTimeout
+		if dt := s.eng.DecisionTimeout(); dt > wait {
+			wait = dt
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), wait)
 		defer cancel()
 		res, err := s.eng.SubmitTickWait(ctx, tick)
 		switch {
@@ -235,6 +241,10 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	out, err := s.eng.SubmitDecisionFull(ctx, d, req.ClientID)
+	if errors.Is(err, engine.ErrIDReused) {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err != nil {
 		if errors.Is(err, engine.ErrClosed) {
 			writeError(w, http.StatusServiceUnavailable, "engine is shutting down")

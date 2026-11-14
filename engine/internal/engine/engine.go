@@ -29,6 +29,10 @@ const venueTimeout = 10 * time.Second
 // ErrClosed is returned when work is submitted to a stopped engine.
 var ErrClosed = errors.New("engine: closed")
 
+// ErrIDReused is returned when a client_id is repeated with a different
+// decision: replaying the old outcome would report a trade the caller didn't ask for.
+var ErrIDReused = errors.New("engine: client_id reused for a different decision")
+
 // ErrBusy is returned when a synchronous tick cannot be queued because the
 // tick buffer is full. The caller must treat the tick as not applied.
 var ErrBusy = errors.New("engine: tick buffer full")
@@ -313,6 +317,9 @@ func (e *Engine) SubmitDecisionFull(ctx context.Context, d types.Decision, clien
 	p := &pendingDecision{decision: d, clientID: clientID, done: make(chan struct{})}
 	if clientID != "" {
 		if prev, replay := e.idem.claim(p); replay {
+			if !sameDecision(prev.decision, d) {
+				return DecisionOutcome{}, ErrIDReused
+			}
 			out, err := e.await(ctx, prev)
 			out.Replayed = true
 			return out, err
@@ -328,6 +335,13 @@ func (e *Engine) SubmitDecisionFull(ctx context.Context, d types.Decision, clien
 		return DecisionOutcome{}, ErrClosed
 	}
 	return e.await(ctx, p)
+}
+
+// sameDecision compares what a caller asked for; the timestamp is excluded
+// because a client may re-stamp a retry.
+func sameDecision(a, b types.Decision) bool {
+	return a.Symbol == b.Symbol && a.Side == b.Side && a.Confidence == b.Confidence &&
+		a.SizeHint == b.SizeHint && a.Veto == b.Veto
 }
 
 func (e *Engine) await(ctx context.Context, p *pendingDecision) (DecisionOutcome, error) {
@@ -553,10 +567,23 @@ func (e *Engine) handleDecision(p *pendingDecision) DecisionOutcome {
 	// never hold both directions at once. The close leg is reported to the
 	// caller and journaled; it is an exit, not a fill, in the counters.
 	if pos := positions[d.Symbol]; !pos.IsFlat() && d.Side.Opposes(pos.Qty) {
-		if closeFill, closed := e.closePosition(d.Symbol, "flip"); closed {
-			out.Fills = append(out.Fills, closeFill)
-			e.journalExit(p.clientID, closeFill)
+		closeFill, closed := e.closePosition(d.Symbol, "flip")
+		if !closed {
+			// The old position may still be open: entering the other way now
+			// would hold both directions. Refuse rather than guess.
+			res.Verdict, res.Reason = risk.RejectInvalid,
+				"flip refused: closing the open "+d.Symbol+" position failed"
+			e.nRejected.Add(1)
+			e.emit(Event{
+				Kind: EventRejected, TS: d.TS, Symbol: d.Symbol, Side: d.Side,
+				Verdict: res.Verdict, Reason: res.Reason, Equity: e.book.Equity(),
+			})
+			e.journalDecision(p, res, nil)
+			out.Result = res
+			return out
 		}
+		out.Fills = append(out.Fills, closeFill)
+		e.journalExit(p.clientID, closeFill)
 	}
 
 	var fill types.Fill

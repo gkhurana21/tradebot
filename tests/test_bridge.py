@@ -310,6 +310,31 @@ def test_non_sim_venue_needs_allow_flag_and_a_real_feed():
         eng.close()
 
 
+def test_lost_tick_reply_at_a_venue_stops_the_run():
+    from tradebot.live.gate import GateStop, PostSendError
+    eng = FakeEngine()
+    eng.venue = "alpaca-paper"
+    try:
+        g = GoGate(eng.url, allow_venue="alpaca-paper", synthetic=False)
+        g.start()
+        assert g.unknown_window >= 2 * g.client.read_timeout   # room for a retry
+        real = g.client.request
+
+        def lose_tick_reply(method, path, payload=None, read_timeout=None):
+            if path.startswith("/tick"):
+                raise PostSendError("read_timeout", "timed out")
+            return real(method, path, payload, read_timeout)
+
+        g.client.request = lose_tick_reply
+        try:
+            g.on_candle(candles(1)("BTC-USD"))
+            raise AssertionError("expected GateStop")
+        except GateStop as e:
+            assert "exit may have happened" in e.reason
+    finally:
+        eng.close()
+
+
 def test_sim_engine_uses_the_short_read_timeout():
     eng = FakeEngine()
     try:

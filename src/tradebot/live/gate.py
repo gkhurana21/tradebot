@@ -275,7 +275,7 @@ class GoGate(Gate):
 
     def __init__(self, url: str, *, allow_venue: str | None = None,
                  synthetic: bool = False, connect_timeout: float = 3.0,
-                 read_timeout: float | None = None, unknown_window: float = 30.0,
+                 read_timeout: float | None = None, unknown_window: float | None = None,
                  retry_pause: float = 0.5, max_consecutive_errors: int = 5,
                  clock=time.monotonic, sleep=time.sleep,
                  id_factory=lambda: uuid.uuid4().hex):
@@ -311,6 +311,11 @@ class GoGate(Gate):
         self.venue = health["venue"]
         self.client.read_timeout = (self._read_timeout if self._read_timeout is not None
                                     else (5.0 if self.venue == "sim" else 25.0))
+        if self.unknown_window is None:
+            # Long enough for the first attempt to time out AND a retry to wait
+            # out the engine's own decision bound (22 s at a venue).
+            self.unknown_window = 30.0 if self.venue == "sim" else \
+                2 * self.client.read_timeout + 5.0
         try:
             status, pos = self.client.request("GET", "/positions")
         except (PreSendError, PostSendError) as e:
@@ -379,8 +384,13 @@ class GoGate(Gate):
                               detail=e.detail[:120], action="skip_bar")
             return False
         except PostSendError as e:
-            # Ticks carry no client_id and are idempotent for pricing, so the
-            # safe response to a lost reply is to skip the bar, not to retry.
+            # The engine may have applied the tick, and a tick can close a
+            # position at its stop. In simulation that is near-impossible on a
+            # loopback reply; at a real venue an exit we never heard about would
+            # leave this run's record wrong, so stop instead of guessing.
+            if self.venue != "sim":
+                raise GateStop(f"tick reply lost at venue {self.venue!r} ({e.kind}); "
+                               "an exit may have happened unrecorded") from e
             self._count_error("gate_error", where="tick", symbol=sym, kind=e.kind,
                               detail=e.detail[:120], action="skip_bar")
             return False
