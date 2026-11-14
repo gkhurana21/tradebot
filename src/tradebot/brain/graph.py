@@ -122,7 +122,7 @@ class GraphBrain:
     used.
     """
 
-    model: str = "claude-opus-4-8"
+    model: str = "claude-opus-5-5"
     max_calls: int | None = None
     # Below this severity the critique is treated as noise and the judge is
     # skipped in the thesis's favour; above `fatal_severity` the trade is
@@ -177,8 +177,8 @@ class GraphBrain:
         return self._to_decision(signal, final)
 
     def cost_report(self) -> str:
-        from .brain import PRICES
-        pin, pout = PRICES.get(self.model, PRICES["claude-opus-4-8"])
+        from .brain import price_for
+        pin, pout = price_for(self.model)
         spend = self.in_tokens / 1e6 * pin + self.out_tokens / 1e6 * pout
         return (f"graph calls: {self.calls_made}  "
                 f"tokens in/out: {self.in_tokens:,}/{self.out_tokens:,}  "

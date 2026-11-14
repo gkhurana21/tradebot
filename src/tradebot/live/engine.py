@@ -17,7 +17,8 @@ from ..brain.brain import Brain
 from ..brokers.base import BrokerAdapter
 from ..core.risk import RiskEngine
 from ..core.strategy import Strategy
-from ..core.types import Candle, Side, Signal
+from ..core.types import Candle, Signal
+from .gate import Gate, GateStop, LocalGate
 
 
 @dataclass
@@ -32,16 +33,27 @@ class LiveTrader:
         self,
         strategy_factory,
         brain: Brain,
-        risk: RiskEngine,
-        broker: BrokerAdapter,
-        fetch_latest,                 # callable(symbol) -> Candle | None
+        risk: RiskEngine | None = None,
+        broker: BrokerAdapter | None = None,
+        fetch_latest=None,            # callable(symbol) -> Candle | None
         config: LiveConfig | None = None,
         on_event=None,                # callable(dict) for logging/streaming
+        gate: Gate | None = None,
     ):
+        """With no `gate`, risk and broker are wrapped in a LocalGate: today's
+        in-process path. Pass a GoGate to let the Go engine size, approve and
+        book trades instead; risk and broker are then unused (and unset)."""
+        if gate is None:
+            if risk is None or broker is None:
+                raise ValueError("LiveTrader needs a gate, or both risk and broker")
+            gate = LocalGate(risk, broker)
+        if fetch_latest is None:
+            raise ValueError("LiveTrader needs fetch_latest")
         self.make_strategy = strategy_factory
         self.brain = brain
-        self.risk = risk
-        self.broker = broker
+        self.gate = gate
+        self.risk = getattr(gate, "risk", None)
+        self.broker = getattr(gate, "broker", None)
         self.fetch_latest = fetch_latest
         self.cfg = config or LiveConfig()
         self.on_event = on_event or (lambda e: None)
@@ -49,6 +61,7 @@ class LiveTrader:
         self._last_ts: dict[str, datetime] = {}
         self._external: "queue.Queue[Signal]" = queue.Queue()
         self._running = False
+        gate.bind(self._emit)
 
     def submit_external_signal(self, signal: Signal) -> None:
         """Thread-safe: push a signal from a webhook / external source."""
@@ -58,18 +71,23 @@ class LiveTrader:
         self._running = False
 
     def run(self, max_iterations: int | None = None) -> None:
+        """Runs until stopped. Raises GateStop (exit code 2 at the CLI) when
+        the gate cannot be trusted any more; a `stop` event is emitted first."""
         self._running = True
-        self.risk.start_day(self.broker.account().equity)
-        self._emit("start", equity=self.broker.account().equity,
-                   broker=self.broker.name(), symbols=self.cfg.symbols)
-        i = 0
-        while self._running:
-            self._tick()
-            i += 1
-            if max_iterations is not None and i >= max_iterations:
-                break
-            time.sleep(self.cfg.poll_seconds)
-        self._emit("stop", equity=self.broker.account().equity)
+        try:
+            self._emit("start", **self.gate.start(), symbols=self.cfg.symbols)
+            i = 0
+            while self._running:
+                self._tick()
+                i += 1
+                if max_iterations is not None and i >= max_iterations:
+                    break
+                time.sleep(self.cfg.poll_seconds)
+        except GateStop as e:
+            self._emit("stop", reason=e.reason, exit_code=e.code,
+                       equity=self.gate.equity(), **self.gate.stop_fields())
+            raise
+        self._emit("stop", equity=self.gate.equity(), **self.gate.stop_fields())
 
     def tick_once(self) -> None:
         """Process one polling cycle (handy for tests / cron-driven runs)."""
@@ -77,75 +95,50 @@ class LiveTrader:
 
     # --- internals ---------------------------------------------------------
     def _tick(self) -> None:
-        # 1) Drain any externally-pushed signals (e.g. TradingView).
-        while not self._external.empty():
-            try:
-                self._process_signal(self._external.get_nowait(), source="external")
-            except queue.Empty:
-                break
+        # 1) Drain any externally-pushed signals (e.g. TradingView). A gate
+        #    that prices from its own marks wants the ticks to land first.
+        if not self.gate.signals_after_ticks:
+            self._drain_external()
         # 2) Poll each symbol for a fresh candle and run the strategy.
         for sym in self.cfg.symbols:
             candle = self._safe_fetch(sym)
             if candle is None or not self._is_new(candle):
                 continue
-            self.risk.roll_day(candle.ts, self.broker.account().equity)
-            self.broker_mark(candle)
-            self._check_exits(candle)
+            applied = self.gate.on_candle(candle)
             sig = self._strategies[sym].on_candle(candle)
-            if sig is not None:
+            if sig is not None and applied:
                 self._process_signal(sig, source="strategy", price=candle.close)
+        if self.gate.signals_after_ticks:
+            self._drain_external()
         # 3) Risk housekeeping.
-        if self.risk.check_kill_switch(self.broker.account()):
-            self._emit("halt", reason="daily drawdown kill switch",
-                       equity=self.broker.account().equity)
+        self.gate.end_cycle()
+
+    def _drain_external(self) -> None:
+        while not self._external.empty():
+            try:
+                sig = self._external.get_nowait()
+            except queue.Empty:
+                break
+            self.gate.before_external(sig)
+            self._process_signal(sig, source="external")
 
     def _process_signal(self, signal: Signal, source: str, price: float | None = None) -> None:
-        acct = self.broker.account()
+        acct = self.gate.account()
+        if acct is None:
+            return  # gate could not give us the account: no trade
         try:
-            px = price if price is not None else self.broker.price(signal.symbol)
+            px = price if price is not None else self.gate.price(signal.symbol)
         except KeyError:
             return  # no mark yet for this symbol
         extra = self._context(signal.symbol)
         decision = self.brain.decide(signal, acct, px, extra)
-        order, reason = self.risk.size_order(decision, acct, px)
-        self._emit("signal", source=source, symbol=signal.symbol,
-                   side=signal.side.value, strength=signal.strength,
-                   confidence=decision.confidence, decision=reason)
-        if order is None:
-            return
-        pos = acct.position(order.symbol)
-        if not pos.is_flat and ((pos.qty > 0) != (order.side == Side.BUY)):
-            self.broker.close(order.symbol, reason="flip") if _accepts_reason(self.broker) \
-                else self.broker.close(order.symbol)
-        fill = self.broker.submit(order)
-        self._emit("fill", symbol=fill.symbol, side=fill.side.value,
-                   qty=fill.qty, price=fill.price,
-                   rationale=decision.rationale, equity=self.broker.account().equity)
-
-    def _check_exits(self, candle: Candle) -> None:
-        pos = self.broker.account().position(candle.symbol)
-        if pos.is_flat:
-            return
-        long = pos.qty > 0
-        if pos.stop_loss is not None and (
-                candle.low <= pos.stop_loss if long else candle.high >= pos.stop_loss):
-            self._close(candle.symbol, "stop")
-        elif pos.take_profit is not None and (
-                candle.high >= pos.take_profit if long else candle.low <= pos.take_profit):
-            self._close(candle.symbol, "target")
-
-    def _close(self, symbol: str, reason: str) -> None:
-        fill = (self.broker.close(symbol, reason=reason) if _accepts_reason(self.broker)
-                else self.broker.close(symbol))
-        if fill:
-            self._emit("exit", symbol=symbol, reason=reason, price=fill.price,
-                       equity=self.broker.account().equity)
+        self.gate.decide(signal, decision, acct, px, source)
 
     def broker_mark(self, candle: Candle) -> None:
-        # PaperBroker exposes mark(); live adapters price internally.
-        mark = getattr(self.broker, "mark", None)
+        """Local gate only: mark the paper broker (kept for callers of the old API)."""
+        mark = getattr(self.gate, "broker_mark", None)
         if callable(mark):
-            mark(candle.symbol, candle.close, candle.ts)
+            mark(candle)
 
     def _context(self, symbol: str) -> dict | None:
         if not self.cfg.onchain_context:
@@ -168,14 +161,8 @@ class LiveTrader:
         self._last_ts[candle.symbol] = candle.ts
         return True
 
-    def _emit(self, kind: str, **data) -> None:
-        event = {"ts": datetime.now(tz=timezone.utc).isoformat(), "event": kind, **data}
+    def _emit(self, event_name: str, /, **data) -> None:
+        # Positional-only so an event may carry its own `kind` field.
+        event = {"ts": datetime.now(tz=timezone.utc).isoformat(), "event": event_name, **data}
         self.on_event(event)
 
-
-def _accepts_reason(broker: BrokerAdapter) -> bool:
-    import inspect
-    try:
-        return "reason" in inspect.signature(broker.close).parameters
-    except (ValueError, TypeError):
-        return False

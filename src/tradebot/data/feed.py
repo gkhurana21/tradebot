@@ -134,6 +134,11 @@ def csv_candles(path: str, symbol: str) -> list[Candle]:
             ts = row["ts"]
             dt = (datetime.fromisoformat(ts) if not ts.isdigit()
                   else datetime.fromtimestamp(int(ts), tz=timezone.utc))
+            if dt.tzinfo is None:
+                # A bare "2026-08-15T00:00" could be any timezone; guessing
+                # would shift every daily session. Make the file say so.
+                raise ValueError(f"{path}: timestamp {ts!r} has no timezone; "
+                                 "write UTC, e.g. 2026-08-15T00:00:00+00:00")
             out.append(Candle(dt, float(row["open"]), float(row["high"]),
                               float(row["low"]), float(row["close"]),
                               float(row["volume"]), symbol))

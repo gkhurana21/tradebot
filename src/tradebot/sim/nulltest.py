@@ -183,3 +183,108 @@ def run_nulltest(
         start=f"{min(all_ts):%Y-%m-%d}" if all_ts else "",
         end=f"{max(all_ts):%Y-%m-%d}" if all_ts else "",
     )
+
+
+def _run_twin(job) -> "_NullRun":
+    streams, strategy_factory, twin_factory, risk_cfg, cash, seed = job
+    r = _run(streams, strategy_factory, twin_factory(seed), risk_cfg, cash)
+    return _NullRun(r.total_return_pct, r.metrics.n_trades)
+
+
+def run_twins(
+    streams: dict[str, list[Candle]],
+    strategy_factory: Callable[[], Strategy],
+    real_brain_factory: Callable[[], Brain],
+    twin_factory: Callable[[int], object],
+    risk_cfg: RiskConfig | None = None,
+    cash: float = 25_000.0,
+    seeds: int = 199,
+    first_seed: int = 1,
+    workers: int | None = None,
+) -> NullTestResult:
+    """Like run_nulltest, but the twins are whatever `twin_factory(seed)` builds.
+
+    run_nulltest's twin is fixed (the real brain with each position chain's
+    direction sign-randomised). This one takes any seeded twin, so a different
+    null, such as random vetoes and flips, shares the same p-value arithmetic
+    and the same fees, slippage, candles and risk engine. Factories must be
+    module-level callables so runs can go to worker processes.
+    """
+    risk_cfg = risk_cfg or RiskConfig(max_open_positions=max(3, len(streams)))
+    real = _run(streams, strategy_factory, real_brain_factory(), risk_cfg, cash)
+    jobs = [(streams, strategy_factory, twin_factory, risk_cfg, cash, first_seed + k)
+            for k in range(seeds)]
+    if workers is None:
+        workers = min(len(jobs), os.cpu_count() or 1)
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            nulls = list(pool.map(_run_twin, jobs, chunksize=max(1, len(jobs) // (workers * 4))))
+    else:
+        nulls = [_run_twin(j) for j in jobs]
+    all_ts = [c.ts for cs in streams.values() for c in cs]
+    return NullTestResult(
+        real_return_pct=real.total_return_pct,
+        null_returns_pct=[n.total_return_pct for n in nulls],
+        p_value=empirical_p(real.total_return_pct, [n.total_return_pct for n in nulls]),
+        real_trades=real.metrics.n_trades,
+        null_median_trades=statistics.median(n.n_trades for n in nulls),
+        real_win_rate_pct=real.metrics.win_rate_pct,
+        bars=max(len(cs) for cs in streams.values()),
+        symbols=list(streams),
+        start=f"{min(all_ts):%Y-%m-%d}" if all_ts else "",
+        end=f"{max(all_ts):%Y-%m-%d}" if all_ts else "",
+    )
+
+
+def histogram_svg(res: NullTestResult, title: str = "Strategy vs 199 coin flips",
+                  bins: int = 24, w: int = 720, h: int = 300) -> str:
+    """A self-contained SVG histogram of the coin-flip returns with the strategy marked.
+
+    Neutral colours that read on both light and dark backgrounds, so it works
+    as a README image on GitHub in either theme.
+    """
+    xs = res.null_returns_pct
+    lo = min(xs + [res.real_return_pct])
+    hi = max(xs + [res.real_return_pct])
+    pad_v = (hi - lo) * 0.06 or 1.0
+    lo, hi = lo - pad_v, hi + pad_v
+    width = (hi - lo) / bins
+    counts = [0] * bins
+    for x in xs:
+        counts[min(bins - 1, int((x - lo) / width))] += 1
+    left, right, top, bottom = 40, 20, 56, 44
+    pw, ph = w - left - right, h - top - bottom
+    peak = max(counts) or 1
+
+    def px(v: float) -> float:
+        return left + (v - lo) / (hi - lo) * pw
+
+    bars = []
+    for i, c in enumerate(counts):
+        if not c:
+            continue
+        bh = c / peak * ph
+        x0 = left + i * pw / bins
+        bars.append(f'<rect x="{x0 + 1:.1f}" y="{top + ph - bh:.1f}" width="{pw / bins - 2:.1f}" '
+                    f'height="{bh:.1f}" rx="2" fill="#8b949e" fill-opacity="0.55"/>')
+    sx = px(res.real_return_pct)
+    ticks = []
+    step = 5 if hi - lo > 15 else 2
+    t = (int(lo // step) + 1) * step
+    while t < hi:
+        ticks.append(f'<text x="{px(t):.1f}" y="{h - 18}" text-anchor="middle">{t:+d}%</text>')
+        t += step
+    font = "font-family=\"-apple-system,Segoe UI,Helvetica,Arial,sans-serif\" font-size=\"12\""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img"
+  aria-label="{title}: strategy {res.real_return_pct:+.2f}%, p = {res.p_value:.3f}">
+  <g {font} fill="#8b949e">
+    <text x="{left}" y="22" font-size="15" font-weight="600">{title}</text>
+    <text x="{left}" y="41">Total return after costs · {", ".join(res.symbols)} · {res.start} → {res.end} · p = {res.p_value:.3f}</text>
+    {"".join(ticks)}
+  </g>
+  <line x1="{left}" y1="{top + ph}" x2="{left + pw}" y2="{top + ph}" stroke="#8b949e" stroke-opacity="0.5"/>
+  {"".join(bars)}
+  <line x1="{sx:.1f}" y1="{top - 4}" x2="{sx:.1f}" y2="{top + ph}" stroke="#2f81f7" stroke-width="2.5"/>
+  <text x="{sx + 6:.1f}" y="{top + 8}" {font} fill="#2f81f7" font-weight="600">strategy {res.real_return_pct:+.2f}%</text>
+</svg>
+'''

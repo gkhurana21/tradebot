@@ -45,10 +45,11 @@ struct TradebotDashboardApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Tradebot Engine") {
+        WindowGroup("Tradebot") {
             DashboardView(model: DashboardHost.shared.model)
-                .frame(minWidth: 860, minHeight: 620)
+                .frame(minWidth: 820, minHeight: 640)
         }
+        .defaultSize(width: 900, height: 760)
         .windowResizability(.contentMinSize)
     }
 }

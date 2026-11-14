@@ -28,7 +28,8 @@ between them because there is no concurrent access — the design removes the
 data-race class rather than defending against it. Verified with `-race`.
 
 **Backpressure is explicit.** Market data is dropped when the buffer is full
-(a stale price is worse than a missing one); decisions block with a caller
+(a stale price is worse than a missing one) unless the caller asked for
+`?wait=1`, in which case a full buffer is a `503`; decisions block with a caller
 context so the client controls its own timeout; telemetry is dropped rather
 than allowed to stall trading.
 
@@ -52,13 +53,104 @@ curl -X POST localhost:8080/decision -d '{"symbol":"BTC-USD","side":"BUY","confi
 curl localhost:8080/positions
 ```
 
+The server binds `127.0.0.1:8080` by default (there is no authentication, so it
+is loopback-only); pass `-addr :8080` to expose it deliberately.
+
 | Endpoint | Purpose |
 |---|---|
-| `POST /tick` | market data; also drives stop/target monitoring |
-| `POST /decision` | proposal in, risk verdict + sized order out |
-| `GET /positions` | equity, cash, open positions |
-| `GET /stats` | cumulative counters, halt state |
-| `GET /health` | liveness |
+| `POST /tick` | market data; also drives stop/target monitoring. Async: `202`, and the tick is dropped if the buffer is full |
+| `POST /tick?wait=1` | same, but applied by the owner goroutine before the reply: `{equity, halted, exits:[{ts, symbol, side, qty, price, fee, reason}]}`. `503` when the tick buffer is full (never a silent drop) |
+| `POST /decision` | proposal in, risk verdict + sized order out. Optional `client_id` (idempotency) and `expect_boot_id` (restart guard); response adds `client_id` and `fills` |
+| `GET /decisions?since=<seq>` | journal of the last 256 decisions, exits and halts (see below) |
+| `GET /positions` | equity, cash, open positions, each with `mark` and `unrealized_pnl` |
+| `GET /stats` | cumulative counters, halt state, `venue`/`live`, `session_start_equity`, `limits` |
+| `GET /health` | `{status, uptime, api: 2, boot_id, venue, live}` |
+
+### Bridge contract (`api: 2`)
+
+- **`boot_id`** is random hex drawn at startup. A client that sends it back as
+  `expect_boot_id` on `POST /decision` gets `409` (before anything is
+  evaluated) if the engine restarted in between.
+- **`client_id`** (max 128 bytes) is recorded when the decision arrives, in a
+  bounded map of the last 4096 ids. A repeat returns the stored result (waiting
+  for the original if it is still in flight, and with `"replayed": true`) and
+  never places a second order, even if the first HTTP request timed out.
+- **`fills`** lists every fill the decision caused, in order: the close leg of a
+  flip (`reason: "flip"`) and then the entry. Rejections return `[]`. These are
+  fills in the book's sense; the flip close still counts as an exit in `/stats`.
+- **Decision timeout** is `5 s` in simulation. With a venue it is
+  `2 x 10 s + 2 s`: a flip is a close and a place, each bounded to 10 s
+  (venue retries run inside that bound). The HTTP `WriteTimeout` is derived
+  from it.
+- **`/stats.limits`** carries the configured fractions (`0.05` is 5%).
+  `session_start_equity` is the kill-switch baseline; the session is the
+  process lifetime (no day roll).
+- **Reasons** carry the numbers: `confidence 0.30 < min 0.55`,
+  `position at max notional 20%`, `max open positions 3 reached`,
+  `halted: daily drawdown 5.2% ≥ 5%`, `sized 0.078 BTC-USD · risk 1.0% to stop`.
+  The typed `verdict` values are unchanged.
+
+### Decision journal
+
+`GET /decisions?since=<seq>` returns
+`{"next_seq", "oldest_seq", "gap", "items": [...]}` from a 256-entry ring that
+only the owner goroutine writes. Items have `seq` (from 1), `at` (engine wall
+clock, RFC3339Nano), `kind` (`decision`, `exit` or `halt`), `reason`, and, where
+they apply, `client_id`, `symbol`, `side`, `confidence`, `verdict`, `approved`,
+`qty`, `price`. `exit` covers bracket exits and flip close legs; `halt` is
+written once, when the kill switch trips.
+
+`since` is inclusive: it returns items with `seq >= since`, so a poller passes
+the previous `next_seq`. Omit it to read everything retained. `gap` is `true`
+when entries the caller asked for were overwritten (`since < oldest_seq` after
+the ring has wrapped); the items returned then start at `oldest_seq`.
+
+## Driving the engine from Python
+
+```bash
+go run ./cmd/engine -venue sim -addr 127.0.0.1:8080 -profile conservative &
+python -m tradebot live --engine http://127.0.0.1:8080 --source synthetic --no-llm
+```
+
+With `--engine`, the Go engine is the only authority on that path. Python
+finds the trade and the engine does everything else:
+
+| Python (`src/tradebot/live/gate.py`, `GoGate`) | Go engine |
+|---|---|
+| sends each bar as `POST /tick?wait=1` (close, high, low) and records the exits it returns | marks the book, checks stops and targets, runs the kill switch |
+| sends every decision, FLAT and vetoes included, as `POST /decision` with a fresh `client_id` and the `boot_id` it saw at startup | sizes, approves or rejects, closes the opposite side on a flip, books the fill |
+| prints the verdict and fills exactly as the engine answered them | owns cash, positions and equity |
+
+Python never sizes an order, checks an exit, closes a flip leg, or keeps a
+kill switch or a book on this path (`tests/test_bridge.py` proves
+`RiskEngine.size_order` is never called). `--cash` and `--profile` are
+ignored with a warning: the engine's own `-cash` and `-profile` apply. The
+default `tradebot live` (no `--engine`) is unchanged and still sizes and fills
+in Python (`LocalGate`).
+
+Python refuses to start, and exits with code `2`, unless `GET /health` says
+`api: 2`, `venue: "sim"` and `live: false`. An `alpaca-paper` engine needs
+`--allow-venue alpaca-paper` and a real feed (`--source coinbase`); a live
+engine is always refused. It stops, exit code `2`, if `boot_id` changes (the
+engine restarted and its book is gone), on a `409`, or after five errors in a
+row.
+
+| What happened | What Python does |
+|---|---|
+| connection refused, DNS failure, connect timeout (nothing was sent) | `gate_error` event, no trade |
+| read timeout, dropped connection, `504`, other `5xx` after a decision was sent | `gate_unknown` event: the engine may have filled it. Pause, re-send the **same** `client_id` (the engine returns the stored result, never a second order) for up to 30 s, then stop with exit `2` |
+| tick `503` or a tick that times out | skip the bar, no decision on a stale mark |
+
+Events are JSON lines (`start`, `signal`, `verdict`, `fill`, `exit`, `halt`,
+`gate_error`, `gate_unknown`, `stop`); `--events-out PATH` also writes them to
+a file. `verdict` carries `rtt_ms`, the Python-to-Go `/decision` round trip.
+`scripts/ci_bridge.sh` and `tests/ci_bridge_check.py` run this end to end in CI
+and check Python's record against `/stats` and `/decisions`.
+
+Sizing is kept in step with the Python research engine by shared fixtures:
+`tests/fixtures/risk_parity.json` is read by `internal/risk/parity_test.go` and
+`tests/test_risk_parity.py`. The intentional differences are listed in
+`docs/DESIGN.md`, record 8.
 
 ## Benchmarks
 
@@ -106,6 +198,7 @@ distance determine the quantity, then clamp to the notional cap.
 internal/risk    table-driven gate coverage, kill switch, concurrent access, benchmarks
 internal/book    P&L correctness (long, short, partial close, averaging), fees, races
 internal/engine  end-to-end flow, bracket exits, flips, halt propagation, shutdown
+internal/risk    also parity_test.go: shared fixtures with the Python risk engine
 ```
 
 Two behaviors worth noting, both tested:

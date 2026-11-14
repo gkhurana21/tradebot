@@ -23,3 +23,6 @@ mm-harness/
 
 # separate repo, tracked on its own
 friday/
+
+# Claude test prompts: rebuilt deterministically by `tradebot nulltest --build-prompts`; sha256 in the pre-registration
+docs/claude/prompts.jsonl

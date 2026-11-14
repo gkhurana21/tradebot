@@ -1,25 +1,36 @@
 # Tradebot Dashboard (SwiftUI)
 
 A native macOS monitor for the Go execution engine. Polls the engine once a
-second and renders equity, risk state, and open positions.
+second and renders equity, the risk gate's decision feed, and open positions.
 
 ```
   Go execution engine  ──HTTP──▶  SwiftUI dashboard
-  :8080 /stats /positions          equity curve · stat tiles · position table
+  :8080 /stats /positions          hero equity · equity curve · decision feed · positions
+        /decisions?since=
 ```
 
 ## Run it
 
 ```bash
 ./build.sh          # compile (needs only Command Line Tools)
-./test.sh           # 10 suites, 31 checks
+./test.sh           # 24 suites, 116 checks
 ./run.sh            # launch, watching http://127.0.0.1:8080
 ./run.sh --url http://host:9000    # watch a remote engine
 ```
 
 With the engine running (`cd ../engine && go run ./cmd/engine`), the dashboard
-comes up live. Without it, the status pill reads **Disconnected** and the last
-known book stays on screen.
+comes up live. Without it, the status pill reads **Reconnecting…** and the last
+known book stays on screen, dimmed.
+
+The window is laid out around the engine's API v2: the **Decisions** feed shows
+each proposal with the gate's verdict (blue Approved, orange Blocked) and its
+reason; red is reserved for losses, HALTED and LIVE. `/decisions` is polled on
+its own path, so an older engine (404) just shows "This engine doesn't publish
+decisions" and stays connected. New engine fields (`session_start_equity`,
+`limits`, position `mark`/`unrealized_pnl`) decode with defaults.
+
+`build.sh` fails if swiftc reports any "only available in macOS" warning, so
+APIs newer than macOS 14 cannot slip in as Swift 5-mode warnings.
 
 Headless connectivity check, no window required — useful over SSH or in CI:
 

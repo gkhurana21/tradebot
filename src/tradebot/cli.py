@@ -4,7 +4,8 @@ Commands:
   backtest    single-symbol backtest
   portfolio   multi-symbol ensemble backtest
   optimize    walk-forward parameter search
-  live        live paper-trading loop (synthetic or coinbase feed)
+  live        live paper-trading loop (synthetic or coinbase feed); --engine URL
+              hands sizing, exits and the kill switch to the Go engine
   webhook     run the TradingView webhook receiver -> live paper trader
   dashboard   write an HTML report from a portfolio backtest
   onchain     print a live on-chain snapshot
@@ -26,6 +27,7 @@ from .core.strategy import (
     BollingerReversion, EmaRsiStrategy, EnsembleStrategy, PatternStrategy)
 from .data import feed
 from .live.engine import LiveConfig, LiveTrader
+from .live.gate import GateStop
 
 
 def _ensemble():
@@ -41,8 +43,8 @@ def _risk(a) -> RiskConfig:
     return cfg
 
 
-_MODELS = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5",
-           "haiku": "claude-haiku-4-5"}
+_MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5",
+           "haiku": "claude-haiku-5-5"}
 
 
 def _brain(a):
@@ -51,7 +53,7 @@ def _brain(a):
     Both kinds satisfy the same decide() contract, so everything downstream --
     backtester, live loop, risk engine -- is identical either way.
     """
-    model = _MODELS.get(getattr(a, "model", None) or "opus", "claude-opus-4-8")
+    model = _MODELS[getattr(a, "model", None) or "opus"]
     max_calls = getattr(a, "max_llm_calls", None)
 
     if getattr(a, "brain", "single") == "graph" and not a.no_llm:
@@ -136,19 +138,56 @@ def cmd_live(a):
         tick = feed.make_synthetic_ticker(symbols[0])
     else:
         tick = lambda sym: feed.coinbase_latest(sym, granularity=60)
-    trader = LiveTrader(
-        _ensemble, Brain(use_llm=not a.no_llm),
-        RiskEngine(_risk(a)),
-        PaperBroker(a.cash), fetch_latest=tick,
-        config=LiveConfig(symbols=symbols, poll_seconds=a.poll, onchain_context=a.onchain),
-        on_event=lambda e: print(json.dumps(e)))
-    print(f"Live paper trader starting ({a.source} feed, {len(symbols)} symbols). "
-          f"Ctrl-C to stop.")
+
+    events_file = open(a.events_out, "w", buffering=1) if a.events_out else None
+
+    def on_event(e):
+        line = json.dumps(e)
+        print(line, flush=True)
+        if events_file:
+            events_file.write(line + "\n")
+
+    engine_url = getattr(a, "engine", None)
+    if engine_url:
+        from .live.gate import GoGate
+        ignored = [flag for flag, given in (("--cash", a.cash != 10_000.0),
+                                            ("--profile", a.profile is not None)) if given]
+        if ignored:
+            print(f"[live] warning: {' and '.join(ignored)} ignored with --engine; "
+                  f"the engine's own -cash and -profile apply", file=sys.stderr)
+        gate = GoGate(engine_url, allow_venue=a.allow_venue,
+                      synthetic=(a.source == "synthetic"))
+        trader = LiveTrader(
+            _ensemble, Brain(use_llm=not a.no_llm), fetch_latest=tick, gate=gate,
+            config=LiveConfig(symbols=symbols, poll_seconds=a.poll,
+                              onchain_context=a.onchain),
+            on_event=on_event)
+        banner = (f"Live trader starting (Go engine at {engine_url} sizes and approves; "
+                  f"{a.source} feed, {len(symbols)} symbols). Ctrl-C to stop.")
+    else:
+        if a.allow_venue:
+            raise SystemExit("--allow-venue only applies with --engine")
+        trader = LiveTrader(
+            _ensemble, Brain(use_llm=not a.no_llm),
+            RiskEngine(_risk(a)),
+            PaperBroker(a.cash), fetch_latest=tick,
+            config=LiveConfig(symbols=symbols, poll_seconds=a.poll, onchain_context=a.onchain),
+            on_event=on_event)
+        banner = (f"Live paper trader starting ({a.source} feed, {len(symbols)} symbols). "
+                  f"Ctrl-C to stop.")
+    # With --engine, stdout is a clean JSON-lines stream, so the banner goes to stderr.
+    print(banner, file=sys.stderr if engine_url else sys.stdout)
     try:
         trader.run(max_iterations=a.iterations)
     except KeyboardInterrupt:
         trader.stop()
         print("\nStopped.")
+    except GateStop as e:
+        print(f"[gate] STOPPED: {e.reason} (exit {e.code})", file=sys.stderr)
+        sys.exit(e.code)
+    finally:
+        if events_file:
+            events_file.close()
 
 
 def cmd_webhook(a):
@@ -210,7 +249,7 @@ def cmd_compare(a):
     if not llm_available:
         print("Claude brain unavailable (need ANTHROPIC_API_KEY + `pip install "
               "anthropic`). Showing heuristic only.\n")
-    model = _MODELS.get(a.model, "claude-opus-4-8")
+    model = _MODELS[a.model]
 
     def progress(made, cap):
         # A run with no output is indistinguishable from a hung one, which is
@@ -319,8 +358,14 @@ def cmd_snapshot(a):
         print(f"{sym}: {len(bars)} hourly bars -> {path}")
 
 
+def _utc(text):
+    from datetime import datetime, timezone
+    dt = datetime.fromisoformat(text)
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+
+
 def cmd_nulltest(a):
-    """Does the strategy beat trading the same moments in random directions?"""
+    """Does the strategy (or the Claude brain) beat trading the same moments at random?"""
     import os
     from .sim.nulltest import run_nulltest
     symbols = _split(a.symbols)
@@ -332,9 +377,81 @@ def cmd_nulltest(a):
             raise SystemExit(f"No snapshot for {', '.join(missing)} in {a.data!r}. Run from the repo "
                              f"root, pass --data, or create one with `tradebot snapshot`.")
         streams = {s: feed.csv_candles(os.path.join(a.data, f"{s}-1h.csv"), s) for s in symbols}
+    if a.start or a.end:
+        from .sim.claudetest import slice_streams
+        streams = slice_streams(streams, _utc(a.start) if a.start else None,
+                                _utc(a.end) if a.end else None)
+    if a.brain == "claude":
+        return _nulltest_claude(a, streams)
     print(f"Running the strategy once and its coin-flip twin {a.seeds} times...")
     res = run_nulltest(streams, _ensemble, seeds=a.seeds, cash=a.cash)
     print(res.summary())
+    if a.svg:
+        from .sim.nulltest import histogram_svg
+        with open(a.svg, "w") as f:
+            f.write(histogram_svg(res, title=f"Strategy vs {a.seeds} coin flips"))
+        print(f"Wrote {a.svg}")
+
+
+def _nulltest_claude(a, streams):
+    """The Claude coin-flip test. Everything here is free except --submit-batch
+    and --collect, which are the only paths that touch the network."""
+    import os
+    from decimal import Decimal
+    from .sim import claudetest as ct
+    model = _MODELS[a.model]
+    window = (f"{a.start or 'snapshot start'} to {a.end or 'snapshot end'} (end exclusive), "
+              f"{', '.join(streams)}")
+    prompts_path, cache_path = a.prompts, a.cache
+    cap = Decimal(a.cap)
+    try:
+        ct.require_testable(model)
+        if a.build_prompts:
+            prompts = ct.build_prompts(streams, _ensemble, model, cash=a.cash)
+            sha = ct.write_prompts(prompts, prompts_path)
+            print(f"Built {len(prompts)} account-free prompts ({model}, prompt {ct.PROMPT_VERSION}, "
+                  f"hash {ct.PROMPT_HASH}) -> {prompts_path}\n  sha256 {sha}")
+            print("Cost bound: " + ct.cost_bound(prompts, model).summary())
+            if a.fill_prereg:
+                n = ct.fill_preregistration(a.fill_prereg, model, prompts, sha, window, cap)
+                print(f"Filled {n} placeholders in {a.fill_prereg}")
+            return
+        if a.fill_prereg:
+            raise SystemExit("--fill-prereg goes with --build-prompts")
+        if a.submit_batch or a.collect or a.dry_run:
+            if not os.path.exists(prompts_path):
+                raise SystemExit(f"No prompts at {prompts_path}; run with --build-prompts first.")
+            prompts = ct.read_prompts(prompts_path)
+        if a.submit_batch or a.dry_run:
+            todo = ct.pending_prompts(prompts, cache_path) if os.path.exists(cache_path) else prompts
+            if a.pilot is not None:
+                todo = todo[:a.pilot]
+            bound = ct.cost_bound(todo, model)
+            print("Cost bound: " + bound.summary() + f" · cap ${cap}")
+            if a.dry_run:
+                ct.enforce_cap(bound, cap)
+                print("Dry run: within the cap, nothing sent.")
+                return
+            res = ct.submit_batch(prompts, cache_path, ct.AnthropicBatchClient(), model,
+                                  cap=cap, pilot=a.pilot)
+            print(f"Submitted batch {res.batch_id}: {res.n_requests} requests"
+                  f"{' (pilot)' if res.pilot else ''}. Run --collect when it has ended.")
+            return
+        if a.collect:
+            res = ct.collect(prompts, cache_path, ct.AnthropicBatchClient(), model,
+                             wait=not a.no_wait)
+            print(f"{res.status}: {res.n_results} results · spend so far ${res.spend_usd:.6f} "
+                  f"(tool counter)")
+            if res.status == "collected":
+                print(f"Cache sha256 {res.cache_sha256}\n" + ct.rates_report(res.rates))
+            return
+        if not os.path.exists(cache_path):
+            raise SystemExit(f"No decision cache at {cache_path}; build prompts, submit and collect first.")
+        print(f"Replaying {cache_path} against {a.seeds} + {a.seeds} twins (no API calls)...")
+        print(ct.run_claude_test(streams, _ensemble, cache_path, model,
+                                 seeds=a.seeds, cash=a.cash).summary())
+    except (ct.CapExceeded, ct.InvalidRun, ct.CacheMiss, ct.CacheMismatch, ValueError) as e:
+        raise SystemExit(str(e))
 
 
 def _print_mode(a):
@@ -379,6 +496,14 @@ def main(argv=None):
     lv.add_argument("--source", choices=["synthetic", "coinbase"], default="synthetic")
     lv.add_argument("--symbols", default="BTC-USD"); lv.add_argument("--poll", type=float, default=2.0)
     lv.add_argument("--iterations", type=int, default=None); lv.add_argument("--onchain", action="store_true")
+    lv.add_argument("--engine", default=None, metavar="URL",
+                    help="drive the Go engine at URL (e.g. http://127.0.0.1:8080): it sizes, "
+                         "approves and books every trade; --cash/--profile are ignored")
+    lv.add_argument("--allow-venue", choices=["alpaca-paper"], default=None, dest="allow_venue",
+                    help="with --engine, also drive an engine whose venue is alpaca-paper "
+                         "(never with --source synthetic; live engines are always refused)")
+    lv.add_argument("--events-out", default=None, dest="events_out", metavar="PATH",
+                    help="also write the JSON events to PATH, one per line")
     lv.set_defaults(func=cmd_live)
 
     wh = sub.add_parser("webhook"); common(wh)
@@ -444,6 +569,28 @@ def main(argv=None):
     nt.add_argument("--bars", type=int, default=1500, help="synthetic only")
     nt.add_argument("--seeds", type=int, default=199)
     nt.add_argument("--cash", type=float, default=25_000.0)
+    nt.add_argument("--svg", default=None, help="also write a histogram of the coin-flip returns")
+    nt.add_argument("--brain", choices=["heuristic", "claude"], default="heuristic")
+    nt.add_argument("--model", choices=sorted(_MODELS), default="haiku", help="claude brain only")
+    nt.add_argument("--start", default=None, help="UTC date, inclusive")
+    nt.add_argument("--end", default=None, help="UTC date, exclusive")
+    nt.add_argument("--prompts", default="docs/claude/prompts.jsonl")
+    nt.add_argument("--cache", default="docs/claude/decisions.jsonl",
+                    help="decision cache (JSONL); the ledger and sha256 sit beside it")
+    nt.add_argument("--build-prompts", action="store_true", dest="build_prompts",
+                    help="free: build every prompt offline, write --prompts, print the cost bound")
+    nt.add_argument("--pilot", type=int, nargs="?", const=50, default=None,
+                    help="submit only the first N prompts (default 50)")
+    nt.add_argument("--submit-batch", action="store_true", dest="submit_batch",
+                    help="PAID: submit one Message Batch (refuses above --cap)")
+    nt.add_argument("--collect", action="store_true", help="PAID path: fetch batch results into --cache")
+    nt.add_argument("--no-wait", action="store_true", dest="no_wait",
+                    help="with --collect: check once instead of polling until the batch ends")
+    nt.add_argument("--cap", default="1.00", help="refuse to submit above this many USD")
+    nt.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="print the cost bound and check the cap; no network")
+    nt.add_argument("--fill-prereg", default=None, dest="fill_prereg",
+                    help="with --build-prompts: fill placeholders in the pre-registration doc")
     nt.set_defaults(func=cmd_nulltest)
 
     args = p.parse_args(argv)
