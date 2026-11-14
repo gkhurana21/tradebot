@@ -80,9 +80,13 @@ class LiveTrader:
         # 1) Drain any externally-pushed signals (e.g. TradingView).
         while not self._external.empty():
             try:
-                self._process_signal(self._external.get_nowait(), source="external")
+                sig = self._external.get_nowait()
             except queue.Empty:
                 break
+            # An alert that arrives after midnight UTC belongs to the new day:
+            # roll the session first, so yesterday's halt doesn't block it.
+            self.risk.roll_day(sig.ts, self.broker.account().equity)
+            self._process_signal(sig, source="external")
         # 2) Poll each symbol for a fresh candle and run the strategy.
         for sym in self.cfg.symbols:
             candle = self._safe_fetch(sym)

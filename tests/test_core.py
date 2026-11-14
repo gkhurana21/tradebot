@@ -160,6 +160,38 @@ def test_report_return_matches_the_summary():
     assert "Synthetic data" in page
 
 
+def test_webhook_alert_after_midnight_rolls_the_day_first():
+    from datetime import timedelta
+    from tradebot.live.engine import LiveConfig, LiveTrader
+    risk = RiskEngine(RiskConfig(max_daily_drawdown_pct=0.05, min_confidence=0.0))
+    broker = PaperBroker(10_000, fee_pct=0.0, slippage_pct=0.0)
+    broker.mark("Z", 100.0, TS)
+    trader = LiveTrader(EmaRsiStrategy, Brain(use_llm=False), risk, broker,
+                        fetch_latest=lambda s: None,
+                        config=LiveConfig(symbols=["Z"], poll_seconds=0))
+    risk.start_day(10_000)
+    risk.roll_day(TS, 10_000)
+    acct = broker.account(); acct.equity = 9_000
+    assert risk.check_kill_switch(acct)                  # halted on day one
+    trader.submit_external_signal(Signal(TS + timedelta(days=1, minutes=1), "Z",
+                                         Side.BUY, 0.9, "tv", {}))
+    trader.tick_once()
+    assert not risk.halted                               # the new day started first
+
+
+def test_csv_without_timezone_is_rejected():
+    import tempfile, os
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as f:
+        f.write("ts,open,high,low,close,volume\n2026-08-15T00:00:00,1,1,1,1,1\n")
+    try:
+        feed.csv_candles(f.name, "X")
+        raise AssertionError("expected a ValueError")
+    except ValueError as e:
+        assert "no timezone" in str(e)
+    finally:
+        os.unlink(f.name)
+
+
 def test_risk_blocks_stacking_past_cap():
     cfg = RiskConfig(max_position_pct=0.2, risk_per_trade_pct=1.0,
                      stop_loss_pct=0.02, min_confidence=0.0)

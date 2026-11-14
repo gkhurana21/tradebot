@@ -66,6 +66,8 @@ class RiskEngine:
         account had going into it. A halt therefore lasts for the rest of the
         day it tripped on, whatever equity does in the meantime, and the next
         day starts fresh from that day's opening equity. Returns True on a roll.
+        A timestamp without a timezone is taken to be UTC; feeds attach UTC,
+        and the CSV loader rejects files that leave the timezone out.
         """
         day = (ts.astimezone(timezone.utc) if ts.tzinfo else ts).date()
         if self._day is None:
