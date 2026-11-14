@@ -12,7 +12,7 @@ public enum ConnectionState: Equatable, Sendable {
     public var label: String {
         switch self {
         case .connecting: return "Connecting"
-        case .live: return "Live"
+        case .live: return "Connected"
         case .failing: return "Disconnected"
         }
     }

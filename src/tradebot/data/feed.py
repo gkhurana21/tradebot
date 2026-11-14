@@ -70,6 +70,43 @@ def coinbase_candles(
     return out
 
 
+def coinbase_history(
+    symbol: str, start: datetime, end: datetime, granularity: int = 3600
+) -> list[Candle]:
+    """Every bar in [start, end) from Coinbase's public API, paged 300 at a time.
+
+    A fixed window gives the same bars on every run, unlike "the latest N",
+    so results computed from it can be reproduced later.
+    """
+    if granularity not in _GRAN:
+        raise ValueError(f"granularity must be one of {sorted(_GRAN)}")
+    step = timedelta(seconds=granularity * 300)
+    out: dict[datetime, Candle] = {}
+    cursor = start
+    while cursor < end:
+        stop = min(cursor + step, end)
+        url = (f"https://api.exchange.coinbase.com/products/{symbol}/candles"
+               f"?granularity={granularity}&start={cursor.isoformat()}&end={stop.isoformat()}")
+        req = urllib.request.Request(url, headers={"User-Agent": "tradebot/0.1"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            rows = json.loads(resp.read().decode())
+        for t, low, high, opn, close, vol in rows:
+            ts = datetime.fromtimestamp(t, tz=timezone.utc)
+            if start <= ts < end:
+                out[ts] = Candle(ts, opn, high, low, close, vol, symbol)
+        cursor = stop
+    return [out[ts] for ts in sorted(out)]
+
+
+def write_csv(candles: list[Candle], path: str) -> None:
+    """Save candles in the format csv_candles reads back."""
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["ts", "open", "high", "low", "close", "volume"])
+        for c in candles:
+            w.writerow([c.ts.isoformat(), c.open, c.high, c.low, c.close, c.volume])
+
+
 def coinbase_latest(symbol: str = "BTC-USD", granularity: int = 60) -> Candle | None:
     """Most recent closed candle — for live polling loops."""
     bars = coinbase_candles(symbol, granularity=granularity, limit=2)

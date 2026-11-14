@@ -29,6 +29,7 @@ class BacktestResult:
     n_signals: int = 0
     n_orders: int = 0      # entries/flips submitted; closed round trips are metrics.n_trades
     n_rejected: int = 0
+    halts: list = field(default_factory=list)   # when the kill switch fired
     n_stops: int = 0
     n_targets: int = 0
 
@@ -86,7 +87,9 @@ class Backtester:
                 res.n_signals += 1
                 self._act_on_signal(signal, candle, res)
 
-            self.risk.check_kill_switch(self.broker.account())
+            was_halted = self.risk.halted
+            if self.risk.check_kill_switch(self.broker.account()) and not was_halted:
+                res.halts.append(candle.ts)
             res.equity_curve.append(self.broker.account().equity)
             res.timestamps.append(candle.ts)
 

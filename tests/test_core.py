@@ -131,6 +131,35 @@ def test_summary_trades_are_round_trips():
     assert f"Orders: {r.n_orders} " in r.summary()
 
 
+def test_backtest_records_when_the_kill_switch_fires():
+    from datetime import timedelta
+
+    class AlwaysBuy:
+        def on_candle(self, c):
+            return Signal(c.ts, c.symbol, Side.BUY, 0.9, "test", {})
+
+    # Two days of hourly bars: day one falls 1% an hour, day two is flat.
+    candles, px = [], 100.0
+    for h in range(48):
+        px = px * 0.99 if h < 24 else px
+        candles.append(Candle(TS + timedelta(hours=h), px, px, px, px, 1.0, "X"))
+    cfg = RiskConfig(stop_loss_pct=0.5, take_profit_pct=0.5, max_position_pct=1.0,
+                     risk_per_trade_pct=0.5, min_confidence=0.0)
+    r = Backtester(AlwaysBuy(), Brain(use_llm=False), RiskEngine(cfg),
+                   PaperBroker(10_000)).run(candles)
+    assert len(r.halts) == 1 and r.halts[0].date() == TS.date(), r.halts
+
+
+def test_report_return_matches_the_summary():
+    from tradebot.backtest.dashboard import render_page
+    r = Backtester(EmaRsiStrategy(), Brain(use_llm=False), RiskEngine(),
+                   PaperBroker(10_000)).run(list(feed.synthetic_candles(n=500, seed=7)))
+    page = render_page(r, "t", banner="Synthetic data")
+    assert f"{r.total_return_pct:+.2f}%" in r.summary()
+    assert f"{r.total_return_pct:+.2f}%" in page
+    assert "Synthetic data" in page
+
+
 def test_risk_blocks_stacking_past_cap():
     cfg = RiskConfig(max_position_pct=0.2, risk_per_trade_pct=1.0,
                      stop_loss_pct=0.02, min_confidence=0.0)

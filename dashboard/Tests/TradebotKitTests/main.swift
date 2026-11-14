@@ -198,6 +198,23 @@ await suite("model accumulates equity history and derives session stats") { @Mai
     checkClose(model.equityHistory.first?.equity ?? 0, 10_500, "oldest sample dropped")
 }
 
+await suite("stats report where orders go, and older engines still decode") {
+    let old = try JSONDecoder().decode(EngineStats.self, from: Data(statsJSON.utf8))
+    checkEqual(old.mode, .sim, "an engine without venue fields reads as simulated")
+
+    let paper = try JSONDecoder().decode(EngineStats.self, from: Data("""
+    {"ticks":1,"decisions":1,"fills":1,"rejected":0,"exits":0,"halted":false,"equity":1,
+     "venue":"alpaca-paper","live":false}
+    """.utf8))
+    checkEqual(paper.mode, .paper, "a non-sim venue without real money is paper")
+
+    let live = try JSONDecoder().decode(EngineStats.self, from: Data("""
+    {"ticks":1,"decisions":1,"fills":1,"rejected":0,"exits":0,"halted":false,"equity":1,
+     "venue":"alpaca-live","live":true}
+    """.utf8))
+    checkEqual(live.mode, .live, "live is reported as live")
+}
+
 await suite("equity chart range hugs the data instead of starting at zero") { @MainActor in
     let model = DashboardModel(client: makeClient())
     let t0 = Date()

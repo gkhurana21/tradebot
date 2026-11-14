@@ -30,6 +30,7 @@ class PortfolioResult:
     n_signals: int = 0
     n_orders: int = 0      # entries/flips submitted; closed round trips are metrics.n_trades
     n_rejected: int = 0
+    halts: list = field(default_factory=list)   # when the kill switch fired
 
     @property
     def total_return_pct(self) -> float:
@@ -99,7 +100,9 @@ class PortfolioBacktester:
                     res.n_orders += 1
                     res.per_symbol[candle.symbol] += 1
 
-            self.risk.check_kill_switch(self.broker.account())
+            was_halted = self.risk.halted
+            if self.risk.check_kill_switch(self.broker.account()) and not was_halted:
+                res.halts.append(candle.ts)
             res.equity_curve.append(self.broker.account().equity)
             res.timestamps.append(candle.ts)
 

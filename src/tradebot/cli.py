@@ -182,7 +182,7 @@ def cmd_dashboard(a):
                              PaperBroker(a.cash))
     res = bt.run(streams)
     with open(a.out, "w") as f:
-        f.write(render_page(res, a.title))
+        f.write(render_page(res, a.title, banner=a.banner))
     print(f"Wrote {a.out}")
     print(res.summary())
 
@@ -300,6 +300,43 @@ def _split(s):
     return [x.strip() for x in s.split(",") if x.strip()]
 
 
+SNAPSHOT_SYMBOLS = ["BTC-USD", "ETH-USD", "SOL-USD"]
+
+
+def cmd_snapshot(a):
+    """Download a fixed Coinbase window to CSV so later runs see the same bars."""
+    from datetime import datetime, timezone
+    import os
+    def utc(text):
+        dt = datetime.fromisoformat(text)
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    start, end = utc(a.start), utc(a.end)
+    os.makedirs(a.out, exist_ok=True)
+    for sym in _split(a.symbols):
+        bars = feed.coinbase_history(sym, start, end, granularity=3600)
+        path = os.path.join(a.out, f"{sym}-1h.csv")
+        feed.write_csv(bars, path)
+        print(f"{sym}: {len(bars)} hourly bars -> {path}")
+
+
+def cmd_nulltest(a):
+    """Does the strategy beat trading the same moments in random directions?"""
+    import os
+    from .sim.nulltest import run_nulltest
+    symbols = _split(a.symbols)
+    if a.source == "synthetic":
+        streams = _load_streams("synthetic", symbols, a.bars)
+    else:
+        missing = [s for s in symbols if not os.path.exists(os.path.join(a.data, f"{s}-1h.csv"))]
+        if missing:
+            raise SystemExit(f"No snapshot for {', '.join(missing)} in {a.data!r}. Run from the repo "
+                             f"root, pass --data, or create one with `tradebot snapshot`.")
+        streams = {s: feed.csv_candles(os.path.join(a.data, f"{s}-1h.csv"), s) for s in symbols}
+    print(f"Running the strategy once and its coin-flip twin {a.seeds} times...")
+    res = run_nulltest(streams, _ensemble, seeds=a.seeds, cash=a.cash)
+    print(res.summary())
+
+
 def _print_mode(a):
     mode = "LLM (Claude)" if (not a.no_llm and _llm_available()) else "heuristic (offline)"
     print(f"Brain mode: {mode}")
@@ -353,7 +390,9 @@ def main(argv=None):
     d = sub.add_parser("dashboard")
     d.add_argument("--symbols", default="BTC-USD,ETH-USD,SOL-USD"); d.add_argument("--bars", type=int, default=1500)
     d.add_argument("--cash", type=float, default=25_000.0); d.add_argument("--out", default="dashboard.html")
-    d.add_argument("--title", default="tradebot — portfolio backtest"); d.set_defaults(func=cmd_dashboard)
+    d.add_argument("--title", default="tradebot — portfolio backtest")
+    d.add_argument("--banner", default=None, help="note shown above the report")
+    d.set_defaults(func=cmd_dashboard)
 
     cmp = sub.add_parser("compare", help="heuristic vs Claude brain on the same data")
     common(cmp)
@@ -390,6 +429,22 @@ def main(argv=None):
     be.set_defaults(func=cmd_breakeven)
 
     oc = sub.add_parser("onchain"); oc.set_defaults(func=cmd_onchain)
+
+    sn = sub.add_parser("snapshot", help="save a fixed Coinbase window to CSV")
+    sn.add_argument("--start", required=True, help="UTC date, e.g. 2026-08-15")
+    sn.add_argument("--end", required=True, help="UTC date, exclusive")
+    sn.add_argument("--symbols", default=",".join(SNAPSHOT_SYMBOLS))
+    sn.add_argument("--out", default="docs/data")
+    sn.set_defaults(func=cmd_snapshot)
+
+    nt = sub.add_parser("nulltest", help="does the strategy beat a coin flip?")
+    nt.add_argument("--source", choices=["synthetic", "snapshot"], default="snapshot")
+    nt.add_argument("--data", default="docs/data", help="folder written by `snapshot`")
+    nt.add_argument("--symbols", default=",".join(SNAPSHOT_SYMBOLS))
+    nt.add_argument("--bars", type=int, default=1500, help="synthetic only")
+    nt.add_argument("--seeds", type=int, default=199)
+    nt.add_argument("--cash", type=float, default=25_000.0)
+    nt.set_defaults(func=cmd_nulltest)
 
     args = p.parse_args(argv)
     args.func(args)

@@ -18,10 +18,10 @@
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?style=flat-square&logo=swift&logoColor=white)
 ![Claude](https://img.shields.io/badge/Claude-brain%20%2B%20MCP-D97757?style=flat-square&logo=anthropic&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-117%20passing-brightgreen?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-130%20passing-brightgreen?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)
 
-[What it does](#-what-it-does) • [Architecture](#-architecture) • [Try it](#-try-it-in-one-command) • [Under the hood](#-under-the-hood)
+[What it does](#-what-it-does) • [Coin-flip test](#-does-it-beat-a-coin-flip) • [Architecture](#%EF%B8%8F-architecture) • [Try it](#-try-it-in-one-command) • [Under the hood](#-under-the-hood)
 
 </div>
 
@@ -47,21 +47,19 @@ model completely or bolt a few `if` checks onto the same process, where one bug 
 A deterministic Go engine sizes, approves or vetoes every proposal, then and only then talks to a broker. A
 research-side bug cannot reach the market without passing the gate, because the gate is not in the same program.
 
-<table>
-<tr>
-<td align="center" width="25%"><h3>104 ns</h3><sub>per risk-gate check, 0 allocations, race-tested</sub></td>
-<td align="center" width="25%"><h3>3</h3><sub>languages, each doing the job it is best at</sub></td>
-<td align="center" width="25%"><h3>117</h3><sub>tests across Go, Python and Swift, plus a cross-language CI job</sub></td>
-<td align="center" width="25%"><h3>2 flags</h3><sub>needed for real money, so one typo never trades it</sub></td>
-</tr>
-</table>
+<p align="center">
+  <img src="docs/screenshots/dashboard-demo.gif" width="720"
+       alt="The SwiftUI dashboard updating live: equity rising, three positions opening, and one low-confidence proposal rejected by the risk gate"/>
+</p>
+<p align="center"><sub>The native dashboard watching the Go engine in <b>SIM</b> mode, fed by a
+<a href="docs/tools/demo_driver.py">scripted driver</a> with made-up prices. The fills and the rejection are the engine's own.</sub></p>
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/dashboard.png" alt="SwiftUI dashboard showing equity, three open long positions with stops and targets, and one rejected decision"/><br/><b>The native monitor.</b> The SwiftUI dashboard watching the Go engine in sim mode: three positions with
-their stops and targets, and one proposal the gate rejected for low confidence.</td>
-<td width="50%"><img src="docs/screenshots/backtest-report.png" alt="HTML backtest report with stat tiles and an equity curve that bleeds steadily to minus 40 percent"/><br/><b>What no edge looks like.</b> The default strategy on a random walk with real fees and slippage:
-979 trades, −40%. The daily kill switch caps each day's loss; it cannot create an edge. Showing that is the job.</td>
+<td align="center" width="25%"><h3>104 ns</h3><sub>per risk-gate check, 0 allocations, race-tested</sub></td>
+<td align="center" width="25%"><h3>p = 0.15</h3><sub>out-of-sample against 199 coin-flip twins: no proven edge, and it says so</sub></td>
+<td align="center" width="25%"><h3>130</h3><sub>tests across Go, Python and Swift, plus a cross-language CI job</sub></td>
+<td align="center" width="25%"><h3>2 flags</h3><sub>needed for real money, so one typo never trades it</sub></td>
 </tr>
 </table>
 
@@ -93,6 +91,41 @@ brain and gate.</td>
 </tr>
 </table>
 
+## 🎲 Does it beat a coin flip?
+
+A backtest return means little on its own. The real question is whether the strategy beats trading
+**the same moments in random directions**. `tradebot nulltest` answers it:
+
+- **Null model.** The same strategy, brain, risk gate, fees, slippage and candles, with one change: each position
+  chain, from opening flat to flat again, gets a random sign. The null reverses, stacks and exits exactly when
+  the strategy would, so turnover and fees match. Only which way each position faces is left to chance.
+- **One primary metric, fixed in advance:** total return after all costs. **p** is the share of 199
+  coin-flip runs that did at least as well.
+- **Out-of-sample data:** Coinbase hourly bars for BTC, ETH and SOL from 2026-08-15 to 2026-10-31. The strategy code
+  last changed on 2026-08-14. The bars are committed in [`docs/data`](docs/data), so anyone gets the same answer.
+
+| | Total return | Round trips |
+|---|---|---|
+| Strategy | **−24.99%** | 624 |
+| Coin flips, median of 199 | −29.65% | 633 |
+| Coin flips, 5th–95th percentile | −36.20% to −21.37% | |
+| **p-value** (one-sided) | **0.150** | |
+
+**Verdict: no evidence of skill.** It lost less than the typical coin flip, but 15% of coin flips did as
+well. The tests sanity-check the method rather than measure its power: it flags a planted look-ahead
+edge, and on runs with no edge it doesn't report significance more often than it should.
+
+```bash
+tradebot nulltest --source snapshot --seeds 199      # ~2 minutes, all cores, no API calls
+```
+
+<p align="center">
+  <img src="docs/screenshots/backtest-report.png" width="720"
+       alt="HTML backtest report: four tiles, an equity curve bleeding to minus 40 percent with drawdown shading and kill-switch markers"/>
+</p>
+<p align="center"><sub>The HTML report on synthetic data: −40% over 979 trades after fees, with drawdown shaded and the
+two days the kill switch fired marked in red. The kill switch caps a bad day; it cannot create an edge.</sub></p>
+
 ## 🏗️ Architecture
 
 ```
@@ -111,7 +144,7 @@ brain and gate.</td>
 |---|---|---|
 | [research + backtesting](src/tradebot) | Python | strategies, Claude brains, backtester, walk-forward optimizer, Monte Carlo, live paper loop |
 | [execution engine](engine) | Go | risk gate, position book, venue seam (sim, Alpaca paper, Alpaca live), HTTP service. Standard library only |
-| [dashboard](dashboard) | SwiftUI | native live monitor: equity curve, positions, halt state |
+| [dashboard](dashboard) | SwiftUI | native live monitor: equity, positions, halt state, and a SIM / PAPER / LIVE badge so real money is never implied |
 | [MCP bridge](mcp) | Python | lets Claude run backtests, sweeps and charts. Read-only |
 | [legacy-bot](legacy-bot) | Python | the July 2026 predecessor, kept for its statistical decision gate (below) |
 
@@ -160,6 +193,8 @@ tradebot webhook --secret YOURSECRET                  # TradingView alert receiv
 tradebot dashboard --out dashboard.html               # HTML report
 tradebot breakeven                                    # win rate needed to beat fees
 tradebot montecarlo                                   # risk-of-ruin simulator
+tradebot nulltest --source snapshot                   # does it beat a coin flip?
+tradebot snapshot --start 2026-08-15 --end 2026-11-01 # save a fixed Coinbase window
 tradebot onchain                                      # live on-chain snapshot
 ```
 
@@ -266,9 +301,9 @@ trading was never built there.
 
 | Suite | Command | Count |
 |---|---|---|
-| Go | `cd engine && go test -race ./...` | 45 tests + 3 benchmarks |
-| Python | `tests/test_core.py`, `tests/test_graph.py` | 23 + 13 tests |
-| Swift | `cd dashboard && ./test.sh` | 36 checks |
+| Go | `cd engine && go test -race ./...` | 46 tests + 3 benchmarks |
+| Python | `tests/test_core.py`, `test_graph.py`, `test_nulltest.py` | 25 + 13 + 7 tests |
+| Swift | `cd dashboard && ./test.sh` | 39 checks |
 
 CI runs all three on every push, plus an **integration job** that starts the Go engine, drives a trade through the
 risk gate and probes it with the Swift client: the cross-language seam unit tests cannot cover.
@@ -282,12 +317,14 @@ risk gate and probes it with the Swift client: the cross-language seam unit test
 | `src/tradebot/brokers/` | broker interface and paper broker (fees, slippage) |
 | `src/tradebot/backtest/` | single-symbol and portfolio backtesters, walk-forward optimizer, HTML report |
 | `src/tradebot/live/` | live paper loop and TradingView webhook |
-| `src/tradebot/sim/` | Monte Carlo and break-even simulators |
+| `src/tradebot/sim/` | Monte Carlo, break-even and coin-flip (null-random) tests |
 | `src/tradebot/data/` | synthetic, Coinbase and CSV feeds; on-chain signals |
 | `engine/` | Go execution engine |
 | `dashboard/` | SwiftUI monitor |
 | `mcp/` | MCP bridge |
 | `legacy-bot/` | July 2026 predecessor |
+| `docs/data/` | the committed Coinbase snapshot behind the coin-flip result |
+| `docs/tools/` | the scripted driver behind the dashboard GIF |
 
 </details>
 
