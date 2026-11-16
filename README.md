@@ -33,6 +33,8 @@
 > [!NOTE]
 > **Status: complete, paper only.** A portfolio project. It is maintained, but not being developed toward live
 > trading. The design choices and their trade-offs are written up in [docs/DESIGN.md](docs/DESIGN.md).
+> **Next:** the replication's data window opened on 2026-11-15. The test runs after 2027-01-15, exactly as
+> [pre-registered](docs/claude-replication-preregistration.md), and its result will be published whatever it shows.
 
 ---
 
